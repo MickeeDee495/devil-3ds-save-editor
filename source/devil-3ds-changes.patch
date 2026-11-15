@@ -1,0 +1,3534 @@
+diff --git a/Source/controls/game_controls.cpp b/Source/controls/game_controls.cpp
+index a780eff..6c9434a 100644
+--- a/Source/controls/game_controls.cpp
++++ b/Source/controls/game_controls.cpp
+@@ -1,1077 +1,1081 @@
+-#include "controls/game_controls.h"
+-
+-#include <cstdint>
+-#ifdef __3DS__
+-#include <algorithm>
+-#include "platform/ctr/belt_gesture.hpp"
+-#include "platform/ctr/ui_geometry.hpp"
+-#include "msg.h"
+-#include "engine/backbuffer_state.hpp"
+-#include "utils/sdl_compat.h"
+-#endif
+-
+-#ifdef USE_SDL3
+-#include <SDL3/SDL_events.h>
+-#else
+-#include <SDL.h>
+-#endif
+-
+-#include "controls/control_mode.hpp"
+-#include "controls/controller.h"
+-#include "controls/controller_motion.h"
+-#ifndef USE_SDL1
+-#include "controls/devices/game_controller.h"
+-#endif
+-#include "controls/devices/joystick.h"
+-#include "controls/padmapper.hpp"
+-#include "controls/plrctrls.h"
+-#include "controls/touch/gamepad.h"
+-#include "control/control.hpp"
+-#include "cursor.h"
+-#include "diablo.h"
+-#include "doom.h"
+-#include "effects.h"
+-#include "game_mode.hpp"
+-#include "gamemenu.h"
+-#include "gmenu.h"
+-#include "inv.h"
+-#include "minitext.h"
+-#include "options.h"
+-#include "panels/charpanel.hpp"
+-#include "panels/quest_log.hpp"
+-#include "panels/spell_book.hpp"
+-#include "panels/spell_list.hpp"
+-#include "qol/stash.h"
+-#include "qol/visual_store.h"
+-#include "stores.h"
+-#include "utils/is_of.hpp"
+-
+-namespace devilution {
+-
+-bool PadMenuNavigatorActive = false;
+-bool PadHotspellMenuActive = false;
+-ControllerButton SuppressedButton = ControllerButton_NONE;
+-
+-namespace {
+-
+-SDL_Keycode TranslateControllerButtonToGameMenuKey(ControllerButton controllerButton)
+-{
+-	switch (TranslateTo(GamepadType, controllerButton)) {
+-	case ControllerButton_BUTTON_A:
+-	case ControllerButton_BUTTON_Y:
+-		return SDLK_RETURN;
+-	case ControllerButton_BUTTON_B:
+-	case ControllerButton_BUTTON_BACK:
+-	case ControllerButton_BUTTON_START:
+-		return SDLK_ESCAPE;
+-	case ControllerButton_BUTTON_LEFTSTICK:
+-		return SDLK_TAB; // Map
+-	default:
+-		return SDLK_UNKNOWN;
+-	}
+-}
+-
+-SDL_Keycode TranslateControllerButtonToMenuKey(ControllerButton controllerButton)
+-{
+-	switch (TranslateTo(GamepadType, controllerButton)) {
+-	case ControllerButton_BUTTON_A:
+-		return SDLK_SPACE;
+-	case ControllerButton_BUTTON_B:
+-	case ControllerButton_BUTTON_BACK:
+-	case ControllerButton_BUTTON_START:
+-		return SDLK_ESCAPE;
+-	case ControllerButton_BUTTON_Y:
+-		return SDLK_RETURN;
+-	case ControllerButton_BUTTON_LEFTSTICK:
+-		return SDLK_TAB; // Map
+-	case ControllerButton_BUTTON_DPAD_LEFT:
+-		return SDLK_LEFT;
+-	case ControllerButton_BUTTON_DPAD_RIGHT:
+-		return SDLK_RIGHT;
+-	case ControllerButton_BUTTON_DPAD_UP:
+-		return SDLK_UP;
+-	case ControllerButton_BUTTON_DPAD_DOWN:
+-		return SDLK_DOWN;
+-	default:
+-		return SDLK_UNKNOWN;
+-	}
+-}
+-
+-SDL_Keycode TranslateControllerButtonToQuestLogKey(ControllerButton controllerButton)
+-{
+-	switch (TranslateTo(GamepadType, controllerButton)) {
+-	case ControllerButton_BUTTON_A:
+-	case ControllerButton_BUTTON_Y:
+-		return SDLK_RETURN;
+-	case ControllerButton_BUTTON_B:
+-		return SDLK_SPACE;
+-	case ControllerButton_BUTTON_LEFTSTICK:
+-		return SDLK_TAB; // Map
+-	default:
+-		return SDLK_UNKNOWN;
+-	}
+-}
+-
+-bool GetGameAction(const SDL_Event &event, ControllerButtonEvent ctrlEvent, GameAction *action)
+-{
+-	const bool inGameMenu = InGameMenu();
+-
+-#ifndef USE_SDL1
+-	if (ControlMode == ControlTypes::VirtualGamepad) {
+-		switch (event.type) {
+-#ifdef USE_SDL3
+-		case SDL_EVENT_FINGER_DOWN:
+-#else
+-		case SDL_FINGERDOWN:
+-#endif
+-			if (VirtualGamepadState.menuPanel.charButton.isHeld && VirtualGamepadState.menuPanel.charButton.didStateChange) {
+-				*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
+-				return true;
+-			}
+-			if (VirtualGamepadState.menuPanel.questsButton.isHeld && VirtualGamepadState.menuPanel.questsButton.didStateChange) {
+-				*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
+-				return true;
+-			}
+-			if (VirtualGamepadState.menuPanel.inventoryButton.isHeld && VirtualGamepadState.menuPanel.inventoryButton.didStateChange) {
+-				*action = GameAction(GameActionType_TOGGLE_INVENTORY);
+-				return true;
+-			}
+-			if (VirtualGamepadState.menuPanel.mapButton.isHeld && VirtualGamepadState.menuPanel.mapButton.didStateChange) {
+-				*action = GameActionSendKey { SDLK_TAB, false };
+-				return true;
+-			}
+-			if (VirtualGamepadState.primaryActionButton.isHeld && VirtualGamepadState.primaryActionButton.didStateChange) {
+-				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+-					*action = GameAction(GameActionType_PRIMARY_ACTION);
+-					if (ControllerActionHeld == GameActionType_NONE) {
+-						ControllerActionHeld = GameActionType_PRIMARY_ACTION;
+-					}
+-				} else if (sgpCurrentMenu != nullptr || IsPlayerInStore() || QuestLogIsOpen) {
+-					*action = GameActionSendKey { SDLK_RETURN, false };
+-				} else {
+-					*action = GameActionSendKey { SDLK_SPACE, false };
+-				}
+-				return true;
+-			}
+-			if (VirtualGamepadState.secondaryActionButton.isHeld && VirtualGamepadState.secondaryActionButton.didStateChange) {
+-				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+-					*action = GameAction(GameActionType_SECONDARY_ACTION);
+-					if (ControllerActionHeld == GameActionType_NONE)
+-						ControllerActionHeld = GameActionType_SECONDARY_ACTION;
+-				}
+-				return true;
+-			}
+-			if (VirtualGamepadState.spellActionButton.isHeld && VirtualGamepadState.spellActionButton.didStateChange) {
+-				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+-					*action = GameAction(GameActionType_CAST_SPELL);
+-					if (ControllerActionHeld == GameActionType_NONE)
+-						ControllerActionHeld = GameActionType_CAST_SPELL;
+-				}
+-				return true;
+-			}
+-			if (VirtualGamepadState.cancelButton.isHeld && VirtualGamepadState.cancelButton.didStateChange) {
+-				if (inGameMenu || DoomFlag || SpellSelectFlag)
+-					*action = GameActionSendKey { SDLK_ESCAPE, false };
+-				else if (invflag)
+-					*action = GameAction(GameActionType_TOGGLE_INVENTORY);
+-				else if (SpellbookFlag)
+-					*action = GameAction(GameActionType_TOGGLE_SPELL_BOOK);
+-				else if (QuestLogIsOpen)
+-					*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
+-				else if (CharFlag)
+-					*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
+-				return true;
+-			}
+-			if (VirtualGamepadState.healthButton.isHeld && VirtualGamepadState.healthButton.didStateChange) {
+-				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
+-					*action = GameAction(GameActionType_USE_HEALTH_POTION);
+-				return true;
+-			}
+-			if (VirtualGamepadState.manaButton.isHeld && VirtualGamepadState.manaButton.didStateChange) {
+-				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
+-					*action = GameAction(GameActionType_USE_MANA_POTION);
+-				return true;
+-			}
+-			break;
+-#ifdef USE_SDL3
+-		case SDL_EVENT_FINGER_UP:
+-#else
+-		case SDL_FINGERUP:
+-#endif
+-			if ((!VirtualGamepadState.primaryActionButton.isHeld && ControllerActionHeld == GameActionType_PRIMARY_ACTION)
+-			    || (!VirtualGamepadState.secondaryActionButton.isHeld && ControllerActionHeld == GameActionType_SECONDARY_ACTION)
+-			    || (!VirtualGamepadState.spellActionButton.isHeld && ControllerActionHeld == GameActionType_CAST_SPELL)) {
+-				// Handle button release for visual store buttons
+-				if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
+-					PerformPrimaryActionRelease();
+-				}
+-				ControllerActionHeld = GameActionType_NONE;
+-				LastPlayerAction = PlayerActionType::None;
+-			}
+-			break;
+-		}
+-	}
+-#endif
+-
+-	if (PadMenuNavigatorActive || PadHotspellMenuActive)
+-		return false;
+-
+-	SDL_Keycode translation = SDLK_UNKNOWN;
+-
+-	if (gmenu_is_active() || IsPlayerInStore())
+-		translation = TranslateControllerButtonToGameMenuKey(ctrlEvent.button);
+-	else if (inGameMenu)
+-		translation = TranslateControllerButtonToMenuKey(ctrlEvent.button);
+-	else if (QuestLogIsOpen)
+-		translation = TranslateControllerButtonToQuestLogKey(ctrlEvent.button);
+-
+-	if (translation != SDLK_UNKNOWN) {
+-		*action = GameActionSendKey { static_cast<uint32_t>(translation), ctrlEvent.up };
+-		return true;
+-	}
+-
+-	return false;
+-}
+-
+-bool CanDeferToMovementHandler(const PadmapperOptions::Action &action)
+-{
+-	if (action.boundInput.modifier != ControllerButton_NONE)
+-		return false;
+-
+-	if (SpellSelectFlag) {
+-		const std::string_view prefix { "QuickSpell" };
+-		const std::string_view key { action.key };
+-		if (key.size() >= prefix.size()) {
+-			const std::string_view truncated { key.data(), prefix.size() };
+-			if (truncated == prefix)
+-				return false;
+-		}
+-	}
+-
+-	return IsAnyOf(action.boundInput.button,
+-	    ControllerButton_BUTTON_DPAD_UP,
+-	    ControllerButton_BUTTON_DPAD_DOWN,
+-	    ControllerButton_BUTTON_DPAD_LEFT,
+-	    ControllerButton_BUTTON_DPAD_RIGHT);
+-}
+-
+-#ifdef __3DS__
+-uint32_t CtrConsumedSpellButtons = 0;
+-
+-struct StashItemButtonState {
+-	bool active = false;
+-	bool finished = true;
+-	bool toStash = false;
+-	uint32_t pressedAt = 0;
+-	Player *player = nullptr;
+-	uint32_t seed = 0;
+-	uint16_t createInfo = 0;
+-	_item_indexes itemIndex = IDI_NONE;
+-} StashItemButton;
+-
+-bool CanFinishStashItemAction()
+-{
+-	return IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag
+-	    && MyPlayer == StashItemButton.player && !MyPlayer->hasNoLife()
+-	    && !MyPlayer->HoldItem.isEmpty()
+-	    && MyPlayer->HoldItem.keyAttributesMatch(StashItemButton.seed, StashItemButton.itemIndex, StashItemButton.createInfo);
+-}
+-
+-void BeginStashItemAction()
+-{
+-	if (StashItemButton.active)
+-		return;
+-	StashItemButton.active = true;
+-	StashItemButton.finished = true;
+-	const bool toStash = !GetLeftPanel().contains(MousePosition);
+-	if (MyPlayer->HoldItem.isEmpty()) {
+-		if (pcursinvitem == -1 && pcursstashitem == StashStruct::EmptyCell)
+-			return;
+-		PerformPrimaryAction();
+-	}
+-	const Item &item = MyPlayer->HoldItem;
+-	if (item.isEmpty())
+-		return;
+-	StashItemButton.finished = false;
+-	StashItemButton.toStash = toStash;
+-	StashItemButton.pressedAt = SDL_GetTicks();
+-	StashItemButton.player = MyPlayer;
+-	StashItemButton.seed = item._iSeed;
+-	StashItemButton.createInfo = item._iCreateInfo;
+-	StashItemButton.itemIndex = item.IDidx;
+-}
+-
+-void FinishStashItemAction()
+-{
+-	Update3DSStashItemAction();
+-	if (!StashItemButton.finished && CanFinishStashItemAction())
+-		TryDropItem();
+-	StashItemButton.active = false;
+-	StashItemButton.finished = true;
+-}
+-
+-struct ButtonAHoldState {
+-	bool active = false;
+-	bool triggered = false;
+-	uint32_t pressedAt = 0;
+-	int invItem = -1;
+-	uint16_t stashItem = StashStruct::EmptyCell;
+-	Point pressPos = { 0, 0 };
+-} ButtonAHold;
+-
+-
+-void DrinkPotion3DS(int firstSlot, int lastSlot)
+-{
+-	Player &player = *MyPlayer;
+-	for (int i = firstSlot; i < lastSlot; i++) {
+-		const Item &item = player.SpdList[i];
+-		if (item.isEmpty())
+-			continue;
+-
+-		const bool isRejuvenation = IsAnyOf(item._iMiscId, IMISC_REJUV, IMISC_FULLREJUV) || (item._iMiscId == IMISC_ARENAPOT && player.isOnArenaLevel());
+-		const bool isHealing = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_HEAL, IMISC_FULLHEAL) || item.isScrollOf(SpellID::Healing);
+-		const bool isMana = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_MANA, IMISC_FULLMANA);
+-
+-		if (isHealing || isMana) {
+-			UseInvItem(INVITEM_BELT_FIRST + i);
+-			return;
+-		}
+-	}
+-}
+-
+-void SwitchUiTab(bool forward)
+-{
+-	// Tab order follows the 3DS menu carousel: quests, character, inventory, spells.
+-	int current = -1;
+-	if (QuestLogIsOpen)
+-		current = 0;
+-	else if (CharFlag)
+-		current = 1;
+-	else if (invflag)
+-		current = 2;
+-	else if (SpellbookFlag)
+-		current = 3;
+-
+-	if (current == -1)
+-		current = 2;
+-
+-	const int next = forward ? ((current + 1) % 4) : ((current + 3) % 4);
+-
+-	if (CharFlag)
+-		CloseCharPanel();
+-	if (invflag)
+-		CloseInventory();
+-	if (QuestLogIsOpen)
+-		QuestLogIsOpen = false;
+-	if (SpellbookFlag)
+-		SpellbookFlag = false;
+-	if (SpellSelectFlag)
+-		SpellSelectFlag = false;
+-
+-	Cancel3DSButtonAHold();
+-
+-	switch (next) {
+-	case 0:
+-		StartQuestlog();
+-		break;
+-	case 1:
+-		OpenCharPanel();
+-		if (CharFlag) {
+-			if (pcurs == CURSOR_DISARM)
+-				NewCursor(CURSOR_HAND);
+-			FocusOnCharInfo();
+-		}
+-		break;
+-	case 2:
+-		invflag = true;
+-		if (pcurs == CURSOR_DISARM)
+-			NewCursor(CURSOR_HAND);
+-		FocusOnInventory();
+-		break;
+-	case 3:
+-		SpellbookFlag = true;
+-		break;
+-	}
+-}
+-
+-void ReleaseControllerButton(ControllerButton button)
+-{
+-	if (button == ControllerButton_BUTTON_A)
+-		button = ControllerButton_BUTTON_B;
+-	else if (button == ControllerButton_BUTTON_B)
+-		button = ControllerButton_BUTTON_A;
+-
+-	const uint32_t buttonMask = uint32_t { 1 } << static_cast<unsigned>(button);
+-	if ((CtrConsumedSpellButtons & buttonMask) != 0) {
+-		CtrConsumedSpellButtons &= ~buttonMask;
+-		return;
+-	}
+-
+-	if (button == ControllerButton_BUTTON_A) {
+-		if (ButtonAHold.active) {
+-			const bool wasTriggered = ButtonAHold.triggered;
+-			Cancel3DSButtonAHold();
+-			if (!wasTriggered) {
+-				PerformPrimaryAction();
+-			}
+-		}
+-		if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
+-			ControllerActionHeld = GameActionType_NONE;
+-			LastPlayerAction = PlayerActionType::None;
+-		}
+-		PerformPrimaryActionRelease();
+-	} else if (button == ControllerButton_BUTTON_X) {
+-		if (ControllerActionHeld == GameActionType_CAST_SPELL) {
+-			ControllerActionHeld = GameActionType_NONE;
+-			LastPlayerAction = PlayerActionType::None;
+-		}
+-	}
+-}
+-#endif
+-
+-void PressControllerButton(ControllerButton button)
+-{
+-	if (IsStashOpen) {
+-		switch (button) {
+-		case ControllerButton_BUTTON_BACK:
+-			StartGoldWithdraw();
+-			return;
+-		case ControllerButton_BUTTON_LEFTSHOULDER:
+-			Stash.PreviousPage();
+-			return;
+-		case ControllerButton_BUTTON_RIGHTSHOULDER:
+-			Stash.NextPage();
+-			return;
+-		default:
+-			break;
+-		}
+-	}
+-
+-	if (PadHotspellMenuActive) {
+-		auto quickSpellAction = [](size_t slot) {
+-			if (SpellSelectFlag) {
+-				SetSpeedSpell(slot);
+-				return;
+-			}
+-			if (!*GetOptions().Gameplay.quickCast)
+-				ToggleSpell(slot);
+-			else
+-				QuickCast(slot);
+-		};
+-		switch (button) {
+-		case devilution::ControllerButton_BUTTON_A:
+-			quickSpellAction(2);
+-			return;
+-		case devilution::ControllerButton_BUTTON_B:
+-			quickSpellAction(3);
+-			return;
+-		case devilution::ControllerButton_BUTTON_X:
+-			quickSpellAction(0);
+-			return;
+-		case devilution::ControllerButton_BUTTON_Y:
+-			quickSpellAction(1);
+-			return;
+-		default:
+-			break;
+-		}
+-	}
+-
+-	if (PadMenuNavigatorActive) {
+-		switch (button) {
+-		case devilution::ControllerButton_BUTTON_DPAD_UP:
+-			PressEscKey();
+-			LastPlayerAction = PlayerActionType::None;
+-			PadHotspellMenuActive = false;
+-			PadMenuNavigatorActive = false;
+-			gamemenu_on();
+-			return;
+-		case devilution::ControllerButton_BUTTON_DPAD_DOWN:
+-			CycleAutomapType();
+-			return;
+-		case devilution::ControllerButton_BUTTON_DPAD_LEFT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+-			return;
+-		case devilution::ControllerButton_BUTTON_DPAD_RIGHT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+-			return;
+-		case devilution::ControllerButton_BUTTON_A:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+-			return;
+-		case devilution::ControllerButton_BUTTON_B:
+-			return;
+-		case devilution::ControllerButton_BUTTON_X:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_QUEST_LOG });
+-			return;
+-		case devilution::ControllerButton_BUTTON_Y:
+-#ifdef __3DS__
+-			GetOptions().Graphics.zoom.SetValue(!*GetOptions().Graphics.zoom);
+-			CalcViewportGeometry();
+-#endif
+-			return;
+-		default:
+-			break;
+-		}
+-	}
+-
+-#ifdef __3DS__
+-	if (button == ControllerButton_BUTTON_A)
+-		button = ControllerButton_BUTTON_B;
+-	else if (button == ControllerButton_BUTTON_B)
+-		button = ControllerButton_BUTTON_A;
+-
+-	if (button != ControllerButton_BUTTON_A)
+-		Cancel3DSButtonAHold();
+-
+-	if (MyPlayerIsDead) {
+-		if (button == ControllerButton_BUTTON_A || button == ControllerButton_BUTTON_B || button == ControllerButton_BUTTON_START) {
+-			if (!gbIsMultiplayer) {
+-				gamemenu_exit_game(false);
+-			} else {
+-				NetSendCmd(true, CMD_RETOWN);
+-			}
+-			return;
+-		}
+-	}
+-
+-	if (Is3DSVisualStoreSalePending()) {
+-		if (button == ControllerButton_BUTTON_A) Confirm3DSVisualStoreSale(true);
+-		else if (button == ControllerButton_BUTTON_B) Confirm3DSVisualStoreSale(false);
+-		return;
+-	}
+-
+-	const bool modifierHeld = IsControllerButtonPressed(ControllerButton_BUTTON_LEFTSHOULDER);
+-	if (HandleCtrSpellBinding(button, modifierHeld)) {
+-		CtrConsumedSpellButtons |= uint32_t { 1 } << static_cast<unsigned>(button);
+-		return;
+-	}
+-
+-	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
+-	if (uiOpen) {
+-		switch (button) {
+-		case ControllerButton_BUTTON_DPAD_UP:
+-			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+-				CloseCharPanel();
+-				QuestLogIsOpen = false;
+-				SpellbookFlag = false;
+-				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+-			}
+-			return;
+-		case ControllerButton_BUTTON_DPAD_LEFT:
+-			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+-				if (QuestLogIsOpen) {
+-					QuestLogIsOpen = false;
+-				} else {
+-					CloseCharPanel();
+-				StartQuestlog();
+-				}
+-			}
+-			return;
+-		case ControllerButton_BUTTON_DPAD_RIGHT:
+-			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+-				if (SpellbookFlag) {
+-					SpellbookFlag = false;
+-				} else {
+-					CloseCharPanel();
+-					CloseInventory();
+-					QuestLogIsOpen = false;
+-					SpellbookFlag = true;
+-				}
+-			}
+-			return;
+-		case ControllerButton_BUTTON_DPAD_DOWN:
+-			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+-				CloseCharPanel();
+-				CloseInventory();
+-				QuestLogIsOpen = false;
+-				SpellbookFlag = false;
+-				DoAutoMap();
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_A:
+-			if (IsPlayerInStore()) {
+-				StoreEnter();
+-			} else if (qtextflag) {
+-				PressEscKey();
+-			} else {
+-				const bool hoveringItem = pcurs == CURSOR_HAND
+-				    && ((invflag && pcursinvitem != -1)
+-				        || (IsStashOpen && pcursstashitem != StashStruct::EmptyCell));
+-				if (MyPlayer->HoldItem.isEmpty() && hoveringItem) {
+-					ButtonAHold.active = true;
+-					ButtonAHold.triggered = false;
+-					ButtonAHold.pressedAt = SDL_GetTicks();
+-					ButtonAHold.invItem = pcursinvitem;
+-					ButtonAHold.stashItem = pcursstashitem;
+-					ButtonAHold.pressPos = MousePosition;
+-				} else {
+-					Cancel3DSButtonAHold();
+-					PerformPrimaryAction();
+-				}
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_B:
+-			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
+-				NewCursor(CURSOR_HAND);
+-				return;
+-			}
+-			PressEscKey();
+-			return;
+-
+-		case ControllerButton_BUTTON_X:
+-			if (invflag)
+-				PerformPrimaryAction();
+-			return;
+-
+-		case ControllerButton_BUTTON_Y:
+-			if (IsVisualStoreOpen) {
+-				PerformSecondaryAction();
+-			} else if (invflag) {
+-				if (MyPlayer->HoldItem.isEmpty())
+-					PerformPrimaryAction();
+-				if (!MyPlayer->HoldItem.isEmpty())
+-					TryDropItem();
+-			} else {
+-				PerformSecondaryAction();
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_LEFTSHOULDER:
+-			if (IsVisualStoreOpen) {
+-				VisualStorePreviousPage();
+-				RedrawEverything();
+-			} else if (IsStashOpen) {
+-				Stash.PreviousPage();
+-			} else {
+-				SwitchUiTab(false);
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_RIGHTSHOULDER:
+-			if (IsVisualStoreOpen) {
+-				VisualStoreNextPage();
+-				RedrawEverything();
+-			} else if (IsStashOpen) {
+-				Stash.NextPage();
+-			} else {
+-				SwitchUiTab(true);
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_BACK:
+-			if (IsStashOpen) {
+-				StartGoldWithdraw();
+-			} else {
+-				CloseCharPanel();
+-				QuestLogIsOpen = false;
+-				SpellbookFlag = false;
+-				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_START:
+-			gamemenu_on();
+-			return;
+-
+-		case ControllerButton_AXIS_TRIGGERLEFT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+-			return;
+-
+-		case ControllerButton_AXIS_TRIGGERRIGHT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+-			return;
+-
+-		default:
+-			break;
+-		}
+-	} else if (!InGameMenu()) {
+-		switch (button) {
+-		case ControllerButton_BUTTON_A:
+-			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
+-				TryIconCurs();
+-				return;
+-			}
+-			ControllerActionHeld = GameActionType_PRIMARY_ACTION;
+-			LastPlayerAction = PlayerActionType::None;
+-			if (pcursitem != -1) {
+-				PerformSecondaryAction();
+-			} else {
+-				PerformPrimaryAction();
+-			}
+-			return;
+-
+-		case ControllerButton_BUTTON_B:
+-			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) NewCursor(CURSOR_HAND);
+-			else PressEscKey();
+-			return;
+-
+-		case ControllerButton_BUTTON_X:
+-		case ControllerButton_BUTTON_Y:
+-		case ControllerButton_BUTTON_LEFTSHOULDER:
+-		case ControllerButton_BUTTON_RIGHTSHOULDER: {
+-			const int slot = CtrSpellBindingSlot(button, false);
+-			if (slot >= 0)
+-				CastCtrSpellShortcut(slot);
+-			return;
+-		}
+-
+-		case ControllerButton_BUTTON_DPAD_UP:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+-			return;
+-
+-		case ControllerButton_BUTTON_DPAD_LEFT:
+-			DrinkPotion3DS(0, 4);
+-			return;
+-
+-		case ControllerButton_BUTTON_DPAD_RIGHT:
+-			DrinkPotion3DS(4, MaxBeltItems);
+-			return;
+-
+-		case ControllerButton_BUTTON_DPAD_DOWN:
+-			DoAutoMap();
+-			return;
+-
+-		case ControllerButton_BUTTON_BACK:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+-			return;
+-
+-		case ControllerButton_BUTTON_START:
+-			gamemenu_on();
+-			return;
+-
+-		case ControllerButton_AXIS_TRIGGERLEFT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+-			return;
+-
+-		case ControllerButton_AXIS_TRIGGERRIGHT:
+-			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+-			return;
+-
+-		default:
+-			break;
+-		}
+-	}
+-#endif
+-
+-	const PadmapperOptions::Action *action = GetOptions().Padmapper.findAction(button, IsControllerButtonPressed);
+-	if (action == nullptr) return;
+-	if (IsMovementHandlerActive() && CanDeferToMovementHandler(*action)) return;
+-	PadmapperPress(button, *action);
+-}
+-
+-} // namespace
+-
+-#ifdef __3DS__
+-namespace {
+-CtrBeltGesture HudBeltGesture;
+-Item HudBeltOriginal;
+-bool HudTouchDown = false;
+-
+-bool CtrHudTouchAllowed()
+-{
+-	return MyPlayer != nullptr && !MyPlayerIsDead && PauseMode == 0 && !gmenu_is_active()
+-	    && !invflag && !CharFlag && !SpellbookFlag && !QuestLogIsOpen
+-	    && !IsPlayerInStore() && !IsStashOpen && !qtextflag && !ChatFlag
+-	    && !DropGoldFlag && !SpellSelectFlag && MyPlayer->HoldItem.isEmpty();
+-}
+-Point CtrHudTouchPoint() { return { MousePosition.x * 320 / gnScreenWidth, MousePosition.y - 240 }; }
+-int CtrHudBeltHit(Point p) {
+-	for (int slot = 0; slot < MaxBeltItems; ++slot)
+-		if (CtrBottomBeltSlot(slot).contains(p)) return slot;
+-	return -1;
+-}
+-bool CtrHudBeltUnchanged() {
+-	if (HudBeltGesture.slot < 0) return false;
+-	const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
+-	return !item.isEmpty() && item._iSeed == HudBeltOriginal._iSeed
+-	    && item.IDidx == HudBeltOriginal.IDidx && item._iCreateInfo == HudBeltOriginal._iCreateInfo
+-	    && item._iMiscId == HudBeltOriginal._iMiscId && item._iSpell == HudBeltOriginal._iSpell;
+-}
+-}
+-
+-void Update3DSHudTouch()
+-{
+-	if (!HudTouchDown || HudBeltGesture.slot < 0) return;
+-	if (!CtrHudTouchAllowed() || (!HudBeltGesture.used && !CtrHudBeltUnchanged())) {
+-		HudBeltGesture.Cancel();
+-		return;
+-	}
+-	if (HudBeltGesture.Update(CtrHudTouchPoint(), SDL_GetTicks())) {
+-		ControlMode = ControlTypes::Gamepad;
+-		const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
+-		if (item.isScroll()) UpdateSpellTarget(item._iSpell);
+-		UseBeltSlot(HudBeltGesture.slot);
+-		RedrawEverything();
+-	}
+-}
+-
+-int CtrHudDraggedBeltSlot()
+-{
+-	return HudTouchDown && HudBeltGesture.dragging && !HudBeltGesture.used ? HudBeltGesture.slot : -1;
+-}
+-
+-bool Handle3DSHudTouch(Uint32 eventType, Uint8 button)
+-{
+-	if (eventType == SDL_EVENT_MOUSE_BUTTON_DOWN && button == SDL_BUTTON_LEFT) {
+-		if (MousePosition.y < 240 || !CtrHudTouchAllowed()) return false;
+-		HudTouchDown = true;
+-		HudBeltGesture.Cancel();
+-		const Point p = CtrHudTouchPoint();
+-		const int belt = CtrHudBeltHit(p);
+-		if (belt >= 0 && !MyPlayer->SpdList[belt].isEmpty()) {
+-			HudBeltGesture.Begin(belt, p, SDL_GetTicks());
+-			HudBeltOriginal = MyPlayer->SpdList[belt];
+-		} else {
+-			for (int slot = 0; slot < CtrSpellShortcutCount; ++slot)
+-				if (CtrHudSpellSlot(slot).contains(p)) {
+-					CastCtrSpellShortcut(slot);
+-					break;
+-				}
+-		}
+-		return true;
+-	}
+-	if (!HudTouchDown) return false;
+-	if (eventType == SDL_EVENT_MOUSE_MOTION) {
+-		Update3DSHudTouch();
+-		RedrawEverything();
+-		return true;
+-	}
+-	if (eventType != SDL_EVENT_MOUSE_BUTTON_UP || button != SDL_BUTTON_LEFT) return false;
+-	Update3DSHudTouch();
+-	if (CtrHudTouchAllowed() && CtrHudBeltUnchanged() && HudBeltGesture.dragging && !HudBeltGesture.used) {
+-		const int target = CtrHudBeltHit(CtrHudTouchPoint());
+-		const int source = HudBeltGesture.slot;
+-		if (target >= 0 && target != source) {
+-			std::swap(MyPlayer->SpdList[source], MyPlayer->SpdList[target]);
+-			MyPlayer->CalcScrolls();
+-			if (MyPlayer->SpdList[source].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, source);
+-			else NetSendCmdChBeltItem(false, source);
+-			if (MyPlayer->SpdList[target].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, target);
+-			else NetSendCmdChBeltItem(false, target);
+-		}
+-	}
+-	HudTouchDown = false;
+-	HudBeltGesture.Cancel();
+-	RedrawEverything();
+-	return true;
+-}
+-
+-void Reset3DSInputAfterResume()
+-{
+-	// Cancel gestures rather than invoking their release actions (drop/sell/use).
+-	Cancel3DSButtonAHold();
+-	Confirm3DSVisualStoreSale(false);
+-	HudTouchDown = false;
+-	HudBeltGesture.Cancel();
+-	StashItemButton.active = false;
+-	StashItemButton.finished = true;
+-	CtrConsumedSpellButtons = 0;
+-	ControllerActionHeld = GameActionType_NONE;
+-	LastPlayerAction = PlayerActionType::None;
+-	sgbMouseDown = CLICK_NONE;
+-	PadHotspellMenuActive = false;
+-	PadMenuNavigatorActive = false;
+-	SuppressedButton = ControllerButton_NONE;
+-	for (unsigned i = ControllerButton::FIRST; i <= ControllerButton::LAST; ++i)
+-		PadmapperRelease(static_cast<ControllerButton>(i), false);
+-	leftStickX = leftStickY = rightStickX = rightStickY = 0;
+-	leftStickXUnscaled = leftStickYUnscaled = rightStickXUnscaled = rightStickYUnscaled = 0;
+-	leftStickNeedsScaling = rightStickNeedsScaling = true;
+-	ResetMainPanelButtons();
+-	if (MyPlayer != nullptr && gbRunGame && !gbIsMultiplayer)
+-		MyPlayer->Stop();
+-	RedrawEverything();
+-}
+-
+-void Update3DSStashItemAction()
+-{
+-	if (!StashItemButton.active || StashItemButton.finished)
+-		return;
+-	if (!CanFinishStashItemAction()) {
+-		StashItemButton.finished = true;
+-		return;
+-	}
+-	if (static_cast<uint32_t>(SDL_GetTicks() - StashItemButton.pressedAt) < 500)
+-		return;
+-	// Consume the gesture even when the destination is full: releasing Y
+-	// after a failed transfer must never turn it into a ground drop.
+-	StashItemButton.finished = true;
+-	Player &player = *MyPlayer;
+-	Item &item = player.HoldItem;
+-	const bool placed = StashItemButton.toStash
+-	    ? AutoPlaceItemInStash(item, true)
+-	    : (item._itype == ItemType::Gold ? GoldAutoPlace(player, item) : AutoPlaceItemInInventory(player, item, true));
+-	if (!placed) {
+-		player.SaySpecific(HeroSpeech::IHaveNoRoom);
+-		return;
+-	}
+-	item.clear();
+-	NewCursor(CURSOR_HAND);
+-	PlaySFX(SfxID::GrabItem);
+-}
+-
+-void Cancel3DSButtonAHold()
+-{
+-	ButtonAHold.active = false;
+-	ButtonAHold.triggered = false;
+-	ButtonAHold.invItem = -1;
+-	ButtonAHold.stashItem = StashStruct::EmptyCell;
+-}
+-
+-void Update3DSButtonAHold()
+-{
+-	if (!ButtonAHold.active || ButtonAHold.triggered)
+-		return;
+-
+-	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
+-	if (!uiOpen) {
+-		Cancel3DSButtonAHold();
+-		return;
+-	}
+-
+-	if (ButtonAHold.invItem != -1 && pcursinvitem != ButtonAHold.invItem) {
+-		Cancel3DSButtonAHold();
+-		return;
+-	}
+-	if (ButtonAHold.stashItem != StashStruct::EmptyCell && pcursstashitem != ButtonAHold.stashItem) {
+-		Cancel3DSButtonAHold();
+-		return;
+-	}
+-
+-	constexpr uint32_t HoldThresholdMs = 350;
+-	if (static_cast<uint32_t>(SDL_GetTicks() - ButtonAHold.pressedAt) < HoldThresholdMs)
+-		return;
+-
+-	ButtonAHold.triggered = true;
+-
+-	if (IsVisualStoreOpen) {
+-		// Selling is an explicit (Y) action with confirmation; holding (A)
+-		// must not sell or use an item while browsing a vendor.
+-		return;
+-	} else if (IsStashOpen && pcursstashitem != StashStruct::EmptyCell) {
+-		CtrlUseStashItem();
+-	} else if (pcursinvitem != -1) {
+-		CtrlUseInvItem();
+-	}
+-}
+-#endif
+-
+-ControllerButton TranslateTo(GamepadLayout layout, ControllerButton button)
+-{
+-	if (layout != GamepadLayout::Nintendo)
+-		return button;
+-
+-	switch (button) {
+-	case ControllerButton_BUTTON_A:
+-		return ControllerButton_BUTTON_B;
+-	case ControllerButton_BUTTON_B:
+-		return ControllerButton_BUTTON_A;
+-	case ControllerButton_BUTTON_X:
+-		return ControllerButton_BUTTON_Y;
+-	case ControllerButton_BUTTON_Y:
+-		return ControllerButton_BUTTON_X;
+-	default:
+-		return button;
+-	}
+-}
+-
+-bool SkipsMovie(ControllerButtonEvent ctrlEvent)
+-{
+-	return IsAnyOf(ctrlEvent.button,
+-	    ControllerButton_BUTTON_A,
+-	    ControllerButton_BUTTON_B,
+-	    ControllerButton_BUTTON_START,
+-	    ControllerButton_BUTTON_BACK);
+-}
+-
+-bool IsSimulatedMouseClickBinding(ControllerButtonEvent ctrlEvent)
+-{
+-	if (ctrlEvent.button == ControllerButton_NONE)
+-		return false;
+-	if (!ctrlEvent.up && ctrlEvent.button == SuppressedButton)
+-		return false;
+-	const std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
+-	return IsAnyOf(actionName, "LeftMouseClick1", "LeftMouseClick2", "RightMouseClick1", "RightMouseClick2");
+-}
+-
+-AxisDirection GetMoveDirection()
+-{
+-	return GetLeftStickOrDpadDirection(true);
+-}
+-
+-bool HandleControllerButtonEvent(const SDL_Event &event, const ControllerButtonEvent ctrlEvent, GameAction &action)
+-{
+-	if (ctrlEvent.button == ControllerButton_IGNORE) {
+-		return false;
+-	}
+-
+-	struct ButtonReleaser {
+-		~ButtonReleaser()
+-		{
+-			if (ctrlEvent.up) PadmapperRelease(ctrlEvent.button, /*invokeAction=*/false);
+-		}
+-		ControllerButtonEvent ctrlEvent;
+-	};
+-
+-	const ButtonReleaser buttonReleaser { ctrlEvent };
+-	const bool isGamepadMotion = IsControllerMotion(event);
+-	if (!isGamepadMotion) {
+-		SimulateRightStickWithPadmapper(ctrlEvent);
+-	}
+-	DetectInputMethod(event, ctrlEvent);
+-	if (isGamepadMotion) {
+-		return true;
+-	}
+-
+-	if (ctrlEvent.button != ControllerButton_NONE && ctrlEvent.button == SuppressedButton) {
+-		if (!ctrlEvent.up)
+-			return true;
+-		SuppressedButton = ControllerButton_NONE;
+-	}
+-
+-#ifdef __3DS__
+-	if (ctrlEvent.button == ControllerButton_BUTTON_Y
+-	    && (StashItemButton.active || (IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag))) {
+-		if (ctrlEvent.up)
+-			FinishStashItemAction();
+-		else
+-			BeginStashItemAction();
+-		return true;
+-	}
+-	if (!ctrlEvent.up && ctrlEvent.button != ControllerButton_NONE)
+-		StashItemButton.finished = true;
+-#endif
+-
+-	if (ctrlEvent.up && !PadmapperActionNameTriggeredByButtonEvent(ctrlEvent).empty()) {
+-		// Button press may have brought up a menu;
+-		// don't confuse release of that button with intent to interact with the menu
+-
+-		// Handle visual store button release for physical gamepad
+-		std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
+-		if (actionName == "PrimaryAction") {
+-			PerformPrimaryActionRelease();
+-		}
+-
+-		PadmapperRelease(ctrlEvent.button, /*invokeAction=*/true);
+-		return true;
+-	} else if (GetGameAction(event, ctrlEvent, &action)) {
+-		ProcessGameAction(action);
+-		return true;
+-	} else if (ctrlEvent.button != ControllerButton_NONE) {
+-#ifdef __3DS__
+-		if (ctrlEvent.up)
+-			ReleaseControllerButton(ctrlEvent.button);
+-		else
+-			PressControllerButton(ctrlEvent.button);
+-#else
+-		if (!ctrlEvent.up)
+-			PressControllerButton(ctrlEvent.button);
+-#endif
+-		return true;
+-	}
+-
+-	return false;
+-}
+-
+-} // namespace devilution
++#include "controls/game_controls.h"
++
++#include <cstdint>
++#ifdef __3DS__
++#include <algorithm>
++#include "platform/ctr/belt_gesture.hpp"
++#include "platform/ctr/ui_geometry.hpp"
++#include "msg.h"
++#include "engine/backbuffer_state.hpp"
++#include "utils/sdl_compat.h"
++#endif
++
++#ifdef USE_SDL3
++#include <SDL3/SDL_events.h>
++#else
++#include <SDL.h>
++#endif
++
++#include "controls/control_mode.hpp"
++#include "controls/controller.h"
++#include "controls/controller_motion.h"
++#ifndef USE_SDL1
++#include "controls/devices/game_controller.h"
++#endif
++#include "controls/devices/joystick.h"
++#include "controls/padmapper.hpp"
++#include "controls/plrctrls.h"
++#include "controls/touch/gamepad.h"
++#include "control/control.hpp"
++#include "cursor.h"
++#include "diablo.h"
++#include "doom.h"
++#include "effects.h"
++#include "game_mode.hpp"
++#include "gamemenu.h"
++#include "gmenu.h"
++#include "inv.h"
++#include "minitext.h"
++#include "options.h"
++#include "panels/charpanel.hpp"
++#include "panels/quest_log.hpp"
++#include "panels/spell_book.hpp"
++#include "panels/spell_list.hpp"
++#include "qol/stash.h"
++#include "qol/visual_store.h"
++#include "stores.h"
++#include "utils/is_of.hpp"
++
++namespace devilution {
++
++bool PadMenuNavigatorActive = false;
++bool PadHotspellMenuActive = false;
++ControllerButton SuppressedButton = ControllerButton_NONE;
++
++namespace {
++
++SDL_Keycode TranslateControllerButtonToGameMenuKey(ControllerButton controllerButton)
++{
++	switch (TranslateTo(GamepadType, controllerButton)) {
++	case ControllerButton_BUTTON_A:
++	case ControllerButton_BUTTON_Y:
++		return SDLK_RETURN;
++	case ControllerButton_BUTTON_B:
++	case ControllerButton_BUTTON_BACK:
++	case ControllerButton_BUTTON_START:
++		return SDLK_ESCAPE;
++	case ControllerButton_BUTTON_LEFTSTICK:
++		return SDLK_TAB; // Map
++	default:
++		return SDLK_UNKNOWN;
++	}
++}
++
++SDL_Keycode TranslateControllerButtonToMenuKey(ControllerButton controllerButton)
++{
++	switch (TranslateTo(GamepadType, controllerButton)) {
++	case ControllerButton_BUTTON_A:
++		return SDLK_SPACE;
++	case ControllerButton_BUTTON_B:
++	case ControllerButton_BUTTON_BACK:
++	case ControllerButton_BUTTON_START:
++		return SDLK_ESCAPE;
++	case ControllerButton_BUTTON_Y:
++		return SDLK_RETURN;
++	case ControllerButton_BUTTON_LEFTSTICK:
++		return SDLK_TAB; // Map
++	case ControllerButton_BUTTON_DPAD_LEFT:
++		return SDLK_LEFT;
++	case ControllerButton_BUTTON_DPAD_RIGHT:
++		return SDLK_RIGHT;
++	case ControllerButton_BUTTON_DPAD_UP:
++		return SDLK_UP;
++	case ControllerButton_BUTTON_DPAD_DOWN:
++		return SDLK_DOWN;
++	default:
++		return SDLK_UNKNOWN;
++	}
++}
++
++SDL_Keycode TranslateControllerButtonToQuestLogKey(ControllerButton controllerButton)
++{
++	switch (TranslateTo(GamepadType, controllerButton)) {
++	case ControllerButton_BUTTON_A:
++	case ControllerButton_BUTTON_Y:
++		return SDLK_RETURN;
++	case ControllerButton_BUTTON_B:
++		return SDLK_SPACE;
++	case ControllerButton_BUTTON_LEFTSTICK:
++		return SDLK_TAB; // Map
++	default:
++		return SDLK_UNKNOWN;
++	}
++}
++
++bool GetGameAction(const SDL_Event &event, ControllerButtonEvent ctrlEvent, GameAction *action)
++{
++	const bool inGameMenu = InGameMenu();
++
++#ifndef USE_SDL1
++	if (ControlMode == ControlTypes::VirtualGamepad) {
++		switch (event.type) {
++#ifdef USE_SDL3
++		case SDL_EVENT_FINGER_DOWN:
++#else
++		case SDL_FINGERDOWN:
++#endif
++			if (VirtualGamepadState.menuPanel.charButton.isHeld && VirtualGamepadState.menuPanel.charButton.didStateChange) {
++				*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
++				return true;
++			}
++			if (VirtualGamepadState.menuPanel.questsButton.isHeld && VirtualGamepadState.menuPanel.questsButton.didStateChange) {
++				*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
++				return true;
++			}
++			if (VirtualGamepadState.menuPanel.inventoryButton.isHeld && VirtualGamepadState.menuPanel.inventoryButton.didStateChange) {
++				*action = GameAction(GameActionType_TOGGLE_INVENTORY);
++				return true;
++			}
++			if (VirtualGamepadState.menuPanel.mapButton.isHeld && VirtualGamepadState.menuPanel.mapButton.didStateChange) {
++				*action = GameActionSendKey { SDLK_TAB, false };
++				return true;
++			}
++			if (VirtualGamepadState.primaryActionButton.isHeld && VirtualGamepadState.primaryActionButton.didStateChange) {
++				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
++					*action = GameAction(GameActionType_PRIMARY_ACTION);
++					if (ControllerActionHeld == GameActionType_NONE) {
++						ControllerActionHeld = GameActionType_PRIMARY_ACTION;
++					}
++				} else if (sgpCurrentMenu != nullptr || IsPlayerInStore() || QuestLogIsOpen) {
++					*action = GameActionSendKey { SDLK_RETURN, false };
++				} else {
++					*action = GameActionSendKey { SDLK_SPACE, false };
++				}
++				return true;
++			}
++			if (VirtualGamepadState.secondaryActionButton.isHeld && VirtualGamepadState.secondaryActionButton.didStateChange) {
++				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
++					*action = GameAction(GameActionType_SECONDARY_ACTION);
++					if (ControllerActionHeld == GameActionType_NONE)
++						ControllerActionHeld = GameActionType_SECONDARY_ACTION;
++				}
++				return true;
++			}
++			if (VirtualGamepadState.spellActionButton.isHeld && VirtualGamepadState.spellActionButton.didStateChange) {
++				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
++					*action = GameAction(GameActionType_CAST_SPELL);
++					if (ControllerActionHeld == GameActionType_NONE)
++						ControllerActionHeld = GameActionType_CAST_SPELL;
++				}
++				return true;
++			}
++			if (VirtualGamepadState.cancelButton.isHeld && VirtualGamepadState.cancelButton.didStateChange) {
++				if (inGameMenu || DoomFlag || SpellSelectFlag)
++					*action = GameActionSendKey { SDLK_ESCAPE, false };
++				else if (invflag)
++					*action = GameAction(GameActionType_TOGGLE_INVENTORY);
++				else if (SpellbookFlag)
++					*action = GameAction(GameActionType_TOGGLE_SPELL_BOOK);
++				else if (QuestLogIsOpen)
++					*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
++				else if (CharFlag)
++					*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
++				return true;
++			}
++			if (VirtualGamepadState.healthButton.isHeld && VirtualGamepadState.healthButton.didStateChange) {
++				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
++					*action = GameAction(GameActionType_USE_HEALTH_POTION);
++				return true;
++			}
++			if (VirtualGamepadState.manaButton.isHeld && VirtualGamepadState.manaButton.didStateChange) {
++				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
++					*action = GameAction(GameActionType_USE_MANA_POTION);
++				return true;
++			}
++			break;
++#ifdef USE_SDL3
++		case SDL_EVENT_FINGER_UP:
++#else
++		case SDL_FINGERUP:
++#endif
++			if ((!VirtualGamepadState.primaryActionButton.isHeld && ControllerActionHeld == GameActionType_PRIMARY_ACTION)
++			    || (!VirtualGamepadState.secondaryActionButton.isHeld && ControllerActionHeld == GameActionType_SECONDARY_ACTION)
++			    || (!VirtualGamepadState.spellActionButton.isHeld && ControllerActionHeld == GameActionType_CAST_SPELL)) {
++				// Handle button release for visual store buttons
++				if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
++					PerformPrimaryActionRelease();
++				}
++				ControllerActionHeld = GameActionType_NONE;
++				LastPlayerAction = PlayerActionType::None;
++			}
++			break;
++		}
++	}
++#endif
++
++	if (PadMenuNavigatorActive || PadHotspellMenuActive)
++		return false;
++
++	SDL_Keycode translation = SDLK_UNKNOWN;
++
++	if (gmenu_is_active() || IsPlayerInStore())
++		translation = TranslateControllerButtonToGameMenuKey(ctrlEvent.button);
++	else if (inGameMenu)
++		translation = TranslateControllerButtonToMenuKey(ctrlEvent.button);
++	else if (QuestLogIsOpen)
++		translation = TranslateControllerButtonToQuestLogKey(ctrlEvent.button);
++
++	if (translation != SDLK_UNKNOWN) {
++		*action = GameActionSendKey { static_cast<uint32_t>(translation), ctrlEvent.up };
++		return true;
++	}
++
++	return false;
++}
++
++bool CanDeferToMovementHandler(const PadmapperOptions::Action &action)
++{
++	if (action.boundInput.modifier != ControllerButton_NONE)
++		return false;
++
++	if (SpellSelectFlag) {
++		const std::string_view prefix { "QuickSpell" };
++		const std::string_view key { action.key };
++		if (key.size() >= prefix.size()) {
++			const std::string_view truncated { key.data(), prefix.size() };
++			if (truncated == prefix)
++				return false;
++		}
++	}
++
++	return IsAnyOf(action.boundInput.button,
++	    ControllerButton_BUTTON_DPAD_UP,
++	    ControllerButton_BUTTON_DPAD_DOWN,
++	    ControllerButton_BUTTON_DPAD_LEFT,
++	    ControllerButton_BUTTON_DPAD_RIGHT);
++}
++
++#ifdef __3DS__
++uint32_t CtrConsumedSpellButtons = 0;
++
++struct StashItemButtonState {
++	bool active = false;
++	bool finished = true;
++	bool toStash = false;
++	uint32_t pressedAt = 0;
++	Player *player = nullptr;
++	uint32_t seed = 0;
++	uint16_t createInfo = 0;
++	_item_indexes itemIndex = IDI_NONE;
++} StashItemButton;
++
++bool CanFinishStashItemAction()
++{
++	return IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag
++	    && MyPlayer == StashItemButton.player && !MyPlayer->hasNoLife()
++	    && !MyPlayer->HoldItem.isEmpty()
++	    && MyPlayer->HoldItem.keyAttributesMatch(StashItemButton.seed, StashItemButton.itemIndex, StashItemButton.createInfo);
++}
++
++void BeginStashItemAction()
++{
++	if (StashItemButton.active)
++		return;
++	StashItemButton.active = true;
++	StashItemButton.finished = true;
++	const bool toStash = !GetLeftPanel().contains(MousePosition);
++	if (MyPlayer->HoldItem.isEmpty()) {
++		if (pcursinvitem == -1 && pcursstashitem == StashStruct::EmptyCell)
++			return;
++		PerformPrimaryAction();
++	}
++	const Item &item = MyPlayer->HoldItem;
++	if (item.isEmpty())
++		return;
++	StashItemButton.finished = false;
++	StashItemButton.toStash = toStash;
++	StashItemButton.pressedAt = SDL_GetTicks();
++	StashItemButton.player = MyPlayer;
++	StashItemButton.seed = item._iSeed;
++	StashItemButton.createInfo = item._iCreateInfo;
++	StashItemButton.itemIndex = item.IDidx;
++}
++
++void FinishStashItemAction()
++{
++	Update3DSStashItemAction();
++	if (!StashItemButton.finished && CanFinishStashItemAction())
++		TryDropItem();
++	StashItemButton.active = false;
++	StashItemButton.finished = true;
++}
++
++struct ButtonAHoldState {
++	bool active = false;
++	bool triggered = false;
++	uint32_t pressedAt = 0;
++	int invItem = -1;
++	uint16_t stashItem = StashStruct::EmptyCell;
++	Point pressPos = { 0, 0 };
++} ButtonAHold;
++
++
++void DrinkPotion3DS(int firstSlot, int lastSlot)
++{
++	Player &player = *MyPlayer;
++	for (int i = firstSlot; i < lastSlot; i++) {
++		const Item &item = player.SpdList[i];
++		if (item.isEmpty())
++			continue;
++
++		const bool isRejuvenation = IsAnyOf(item._iMiscId, IMISC_REJUV, IMISC_FULLREJUV) || (item._iMiscId == IMISC_ARENAPOT && player.isOnArenaLevel());
++		const bool isHealing = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_HEAL, IMISC_FULLHEAL) || item.isScrollOf(SpellID::Healing);
++		const bool isMana = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_MANA, IMISC_FULLMANA);
++
++		if (isHealing || isMana) {
++			UseInvItem(INVITEM_BELT_FIRST + i);
++			return;
++		}
++	}
++}
++
++void SwitchUiTab(bool forward)
++{
++	// Tab order follows the 3DS menu carousel: quests, character, inventory, spells.
++	int current = -1;
++	if (QuestLogIsOpen)
++		current = 0;
++	else if (CharFlag)
++		current = 1;
++	else if (invflag)
++		current = 2;
++	else if (SpellbookFlag)
++		current = 3;
++
++	if (current == -1)
++		current = 2;
++
++	const int next = forward ? ((current + 1) % 4) : ((current + 3) % 4);
++
++	if (CharFlag)
++		CloseCharPanel();
++	if (invflag)
++		CloseInventory();
++	if (QuestLogIsOpen)
++		QuestLogIsOpen = false;
++	if (SpellbookFlag)
++		SpellbookFlag = false;
++	if (SpellSelectFlag)
++		SpellSelectFlag = false;
++
++	Cancel3DSButtonAHold();
++
++	switch (next) {
++	case 0:
++		StartQuestlog();
++		break;
++	case 1:
++		OpenCharPanel();
++		if (CharFlag) {
++			if (pcurs == CURSOR_DISARM)
++				NewCursor(CURSOR_HAND);
++			FocusOnCharInfo();
++		}
++		break;
++	case 2:
++		invflag = true;
++		if (pcurs == CURSOR_DISARM)
++			NewCursor(CURSOR_HAND);
++		FocusOnInventory();
++		break;
++	case 3:
++		SpellbookFlag = true;
++		break;
++	}
++}
++
++void ReleaseControllerButton(ControllerButton button)
++{
++	if (button == ControllerButton_BUTTON_A)
++		button = ControllerButton_BUTTON_B;
++	else if (button == ControllerButton_BUTTON_B)
++		button = ControllerButton_BUTTON_A;
++
++	const uint32_t buttonMask = uint32_t { 1 } << static_cast<unsigned>(button);
++	if ((CtrConsumedSpellButtons & buttonMask) != 0) {
++		CtrConsumedSpellButtons &= ~buttonMask;
++		return;
++	}
++
++	if (button == ControllerButton_BUTTON_A) {
++		if (ButtonAHold.active) {
++			const bool wasTriggered = ButtonAHold.triggered;
++			Cancel3DSButtonAHold();
++			if (!wasTriggered) {
++				PerformPrimaryAction();
++			}
++		}
++		if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
++			ControllerActionHeld = GameActionType_NONE;
++			LastPlayerAction = PlayerActionType::None;
++		}
++		PerformPrimaryActionRelease();
++	} else if (button == ControllerButton_BUTTON_X) {
++		if (ControllerActionHeld == GameActionType_CAST_SPELL) {
++			ControllerActionHeld = GameActionType_NONE;
++			LastPlayerAction = PlayerActionType::None;
++		}
++	}
++}
++#endif
++
++void PressControllerButton(ControllerButton button)
++{
++	if (IsStashOpen) {
++		switch (button) {
++		case ControllerButton_BUTTON_BACK:
++			StartGoldWithdraw();
++			return;
++		case ControllerButton_BUTTON_LEFTSHOULDER:
++			Stash.PreviousPage();
++			return;
++		case ControllerButton_BUTTON_RIGHTSHOULDER:
++			Stash.NextPage();
++			return;
++		default:
++			break;
++		}
++	}
++
++	if (PadHotspellMenuActive) {
++		auto quickSpellAction = [](size_t slot) {
++			if (SpellSelectFlag) {
++				SetSpeedSpell(slot);
++				return;
++			}
++			if (!*GetOptions().Gameplay.quickCast)
++				ToggleSpell(slot);
++			else
++				QuickCast(slot);
++		};
++		switch (button) {
++		case devilution::ControllerButton_BUTTON_A:
++			quickSpellAction(2);
++			return;
++		case devilution::ControllerButton_BUTTON_B:
++			quickSpellAction(3);
++			return;
++		case devilution::ControllerButton_BUTTON_X:
++			quickSpellAction(0);
++			return;
++		case devilution::ControllerButton_BUTTON_Y:
++			quickSpellAction(1);
++			return;
++		default:
++			break;
++		}
++	}
++
++	if (PadMenuNavigatorActive) {
++		switch (button) {
++		case devilution::ControllerButton_BUTTON_DPAD_UP:
++			PressEscKey();
++			LastPlayerAction = PlayerActionType::None;
++			PadHotspellMenuActive = false;
++			PadMenuNavigatorActive = false;
++			gamemenu_on();
++			return;
++		case devilution::ControllerButton_BUTTON_DPAD_DOWN:
++			CycleAutomapType();
++			return;
++		case devilution::ControllerButton_BUTTON_DPAD_LEFT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
++			return;
++		case devilution::ControllerButton_BUTTON_DPAD_RIGHT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
++			return;
++		case devilution::ControllerButton_BUTTON_A:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
++			return;
++		case devilution::ControllerButton_BUTTON_B:
++			return;
++		case devilution::ControllerButton_BUTTON_X:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_QUEST_LOG });
++			return;
++		case devilution::ControllerButton_BUTTON_Y:
++#ifdef __3DS__
++			GetOptions().Graphics.zoom.SetValue(!*GetOptions().Graphics.zoom);
++			CalcViewportGeometry();
++#endif
++			return;
++		default:
++			break;
++		}
++	}
++
++#ifdef __3DS__
++	if (button == ControllerButton_BUTTON_A)
++		button = ControllerButton_BUTTON_B;
++	else if (button == ControllerButton_BUTTON_B)
++		button = ControllerButton_BUTTON_A;
++
++	if (button != ControllerButton_BUTTON_A)
++		Cancel3DSButtonAHold();
++
++	if (MyPlayerIsDead) {
++		if (button == ControllerButton_BUTTON_A || button == ControllerButton_BUTTON_B || button == ControllerButton_BUTTON_START) {
++			if (!gbIsMultiplayer) {
++				gamemenu_exit_game(false);
++			} else {
++				NetSendCmd(true, CMD_RETOWN);
++			}
++			return;
++		}
++	}
++
++	if (Is3DSVisualStoreSalePending()) {
++		if (button == ControllerButton_BUTTON_A) Confirm3DSVisualStoreSale(true);
++		else if (button == ControllerButton_BUTTON_B) Confirm3DSVisualStoreSale(false);
++		return;
++	}
++
++	const bool modifierHeld = IsControllerButtonPressed(ControllerButton_BUTTON_LEFTSHOULDER);
++	if (HandleCtrSpellBinding(button, modifierHeld)) {
++		CtrConsumedSpellButtons |= uint32_t { 1 } << static_cast<unsigned>(button);
++		return;
++	}
++
++	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
++	if (uiOpen) {
++		switch (button) {
++		case ControllerButton_BUTTON_DPAD_UP:
++			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
++				CloseCharPanel();
++				QuestLogIsOpen = false;
++				SpellbookFlag = false;
++				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
++			}
++			return;
++		case ControllerButton_BUTTON_DPAD_LEFT:
++			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
++				if (QuestLogIsOpen) {
++					QuestLogIsOpen = false;
++				} else {
++					CloseCharPanel();
++				StartQuestlog();
++				}
++			}
++			return;
++		case ControllerButton_BUTTON_DPAD_RIGHT:
++			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
++				if (SpellbookFlag) {
++					SpellbookFlag = false;
++				} else {
++					CloseCharPanel();
++					CloseInventory();
++					QuestLogIsOpen = false;
++					SpellbookFlag = true;
++				}
++			}
++			return;
++		case ControllerButton_BUTTON_DPAD_DOWN:
++			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
++				CloseCharPanel();
++				CloseInventory();
++				QuestLogIsOpen = false;
++				SpellbookFlag = false;
++				DoAutoMap();
++			}
++			return;
++
++		case ControllerButton_BUTTON_A:
++			if (IsPlayerInStore()) {
++				StoreEnter();
++			} else if (qtextflag) {
++				PressEscKey();
++			} else {
++				const bool hoveringItem = pcurs == CURSOR_HAND
++				    && ((invflag && pcursinvitem != -1)
++				        || (IsStashOpen && pcursstashitem != StashStruct::EmptyCell));
++				if (MyPlayer->HoldItem.isEmpty() && hoveringItem) {
++					ButtonAHold.active = true;
++					ButtonAHold.triggered = false;
++					ButtonAHold.pressedAt = SDL_GetTicks();
++					ButtonAHold.invItem = pcursinvitem;
++					ButtonAHold.stashItem = pcursstashitem;
++					ButtonAHold.pressPos = MousePosition;
++				} else {
++					Cancel3DSButtonAHold();
++					PerformPrimaryAction();
++				}
++			}
++			return;
++
++		case ControllerButton_BUTTON_B:
++			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
++				NewCursor(CURSOR_HAND);
++				return;
++			}
++			PressEscKey();
++			return;
++
++		case ControllerButton_BUTTON_X:
++			if (invflag)
++				PerformPrimaryAction();
++			return;
++
++		case ControllerButton_BUTTON_Y:
++			if (IsVisualStoreOpen) {
++				PerformSecondaryAction();
++			} else if (IsStashOpen) {
++				PerformSecondaryAction();
++			} else if (invflag) {
++				if (MyPlayer->HoldItem.isEmpty())
++					PerformPrimaryAction();
++				if (!MyPlayer->HoldItem.isEmpty())
++					TryDropItem();
++			} else {
++				PerformSecondaryAction();
++			}
++			return;
++
++		case ControllerButton_BUTTON_LEFTSHOULDER:
++			if (IsVisualStoreOpen) {
++				VisualStorePreviousPage();
++				RedrawEverything();
++			} else if (IsStashOpen) {
++				Stash.PreviousPage();
++			} else {
++				SwitchUiTab(false);
++			}
++			return;
++
++		case ControllerButton_BUTTON_RIGHTSHOULDER:
++			if (IsVisualStoreOpen) {
++				VisualStoreNextPage();
++				RedrawEverything();
++			} else if (IsStashOpen) {
++				Stash.NextPage();
++			} else {
++				SwitchUiTab(true);
++			}
++			return;
++
++		case ControllerButton_BUTTON_BACK:
++			if (IsStashOpen) {
++				StartGoldWithdraw();
++			} else if (IsVisualStoreOpen) {
++				VisualStoreRepairAll();
++			} else {
++				CloseCharPanel();
++				QuestLogIsOpen = false;
++				SpellbookFlag = false;
++				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
++			}
++			return;
++
++		case ControllerButton_BUTTON_START:
++			gamemenu_on();
++			return;
++
++		case ControllerButton_AXIS_TRIGGERLEFT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
++			return;
++
++		case ControllerButton_AXIS_TRIGGERRIGHT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
++			return;
++
++		default:
++			break;
++		}
++	} else if (!InGameMenu()) {
++		switch (button) {
++		case ControllerButton_BUTTON_A:
++			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
++				TryIconCurs();
++				return;
++			}
++			ControllerActionHeld = GameActionType_PRIMARY_ACTION;
++			LastPlayerAction = PlayerActionType::None;
++			if (pcursitem != -1) {
++				PerformSecondaryAction();
++			} else {
++				PerformPrimaryAction();
++			}
++			return;
++
++		case ControllerButton_BUTTON_B:
++			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) NewCursor(CURSOR_HAND);
++			else PressEscKey();
++			return;
++
++		case ControllerButton_BUTTON_X:
++		case ControllerButton_BUTTON_Y:
++		case ControllerButton_BUTTON_LEFTSHOULDER:
++		case ControllerButton_BUTTON_RIGHTSHOULDER: {
++			const int slot = CtrSpellBindingSlot(button, false);
++			if (slot >= 0)
++				CastCtrSpellShortcut(slot);
++			return;
++		}
++
++		case ControllerButton_BUTTON_DPAD_UP:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
++			return;
++
++		case ControllerButton_BUTTON_DPAD_LEFT:
++			DrinkPotion3DS(0, 4);
++			return;
++
++		case ControllerButton_BUTTON_DPAD_RIGHT:
++			DrinkPotion3DS(4, MaxBeltItems);
++			return;
++
++		case ControllerButton_BUTTON_DPAD_DOWN:
++			DoAutoMap();
++			return;
++
++		case ControllerButton_BUTTON_BACK:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
++			return;
++
++		case ControllerButton_BUTTON_START:
++			gamemenu_on();
++			return;
++
++		case ControllerButton_AXIS_TRIGGERLEFT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
++			return;
++
++		case ControllerButton_AXIS_TRIGGERRIGHT:
++			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
++			return;
++
++		default:
++			break;
++		}
++	}
++#endif
++
++	const PadmapperOptions::Action *action = GetOptions().Padmapper.findAction(button, IsControllerButtonPressed);
++	if (action == nullptr) return;
++	if (IsMovementHandlerActive() && CanDeferToMovementHandler(*action)) return;
++	PadmapperPress(button, *action);
++}
++
++} // namespace
++
++#ifdef __3DS__
++namespace {
++CtrBeltGesture HudBeltGesture;
++Item HudBeltOriginal;
++bool HudTouchDown = false;
++
++bool CtrHudTouchAllowed()
++{
++	return MyPlayer != nullptr && !MyPlayerIsDead && PauseMode == 0 && !gmenu_is_active()
++	    && !invflag && !CharFlag && !SpellbookFlag && !QuestLogIsOpen
++	    && !IsPlayerInStore() && !IsStashOpen && !qtextflag && !ChatFlag
++	    && !DropGoldFlag && !SpellSelectFlag && MyPlayer->HoldItem.isEmpty();
++}
++Point CtrHudTouchPoint() { return { MousePosition.x * 320 / gnScreenWidth, MousePosition.y - 240 }; }
++int CtrHudBeltHit(Point p) {
++	for (int slot = 0; slot < MaxBeltItems; ++slot)
++		if (CtrBottomBeltSlot(slot).contains(p)) return slot;
++	return -1;
++}
++bool CtrHudBeltUnchanged() {
++	if (HudBeltGesture.slot < 0) return false;
++	const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
++	return !item.isEmpty() && item._iSeed == HudBeltOriginal._iSeed
++	    && item.IDidx == HudBeltOriginal.IDidx && item._iCreateInfo == HudBeltOriginal._iCreateInfo
++	    && item._iMiscId == HudBeltOriginal._iMiscId && item._iSpell == HudBeltOriginal._iSpell;
++}
++}
++
++void Update3DSHudTouch()
++{
++	if (!HudTouchDown || HudBeltGesture.slot < 0) return;
++	if (!CtrHudTouchAllowed() || (!HudBeltGesture.used && !CtrHudBeltUnchanged())) {
++		HudBeltGesture.Cancel();
++		return;
++	}
++	if (HudBeltGesture.Update(CtrHudTouchPoint(), SDL_GetTicks())) {
++		ControlMode = ControlTypes::Gamepad;
++		const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
++		if (item.isScroll()) UpdateSpellTarget(item._iSpell);
++		UseBeltSlot(HudBeltGesture.slot);
++		RedrawEverything();
++	}
++}
++
++int CtrHudDraggedBeltSlot()
++{
++	return HudTouchDown && HudBeltGesture.dragging && !HudBeltGesture.used ? HudBeltGesture.slot : -1;
++}
++
++bool Handle3DSHudTouch(Uint32 eventType, Uint8 button)
++{
++	if (eventType == SDL_EVENT_MOUSE_BUTTON_DOWN && button == SDL_BUTTON_LEFT) {
++		if (MousePosition.y < 240 || !CtrHudTouchAllowed()) return false;
++		HudTouchDown = true;
++		HudBeltGesture.Cancel();
++		const Point p = CtrHudTouchPoint();
++		const int belt = CtrHudBeltHit(p);
++		if (belt >= 0 && !MyPlayer->SpdList[belt].isEmpty()) {
++			HudBeltGesture.Begin(belt, p, SDL_GetTicks());
++			HudBeltOriginal = MyPlayer->SpdList[belt];
++		} else {
++			for (int slot = 0; slot < CtrSpellShortcutCount; ++slot)
++				if (CtrHudSpellSlot(slot).contains(p)) {
++					CastCtrSpellShortcut(slot);
++					break;
++				}
++		}
++		return true;
++	}
++	if (!HudTouchDown) return false;
++	if (eventType == SDL_EVENT_MOUSE_MOTION) {
++		Update3DSHudTouch();
++		RedrawEverything();
++		return true;
++	}
++	if (eventType != SDL_EVENT_MOUSE_BUTTON_UP || button != SDL_BUTTON_LEFT) return false;
++	Update3DSHudTouch();
++	if (CtrHudTouchAllowed() && CtrHudBeltUnchanged() && HudBeltGesture.dragging && !HudBeltGesture.used) {
++		const int target = CtrHudBeltHit(CtrHudTouchPoint());
++		const int source = HudBeltGesture.slot;
++		if (target >= 0 && target != source) {
++			std::swap(MyPlayer->SpdList[source], MyPlayer->SpdList[target]);
++			MyPlayer->CalcScrolls();
++			if (MyPlayer->SpdList[source].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, source);
++			else NetSendCmdChBeltItem(false, source);
++			if (MyPlayer->SpdList[target].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, target);
++			else NetSendCmdChBeltItem(false, target);
++		}
++	}
++	HudTouchDown = false;
++	HudBeltGesture.Cancel();
++	RedrawEverything();
++	return true;
++}
++
++void Reset3DSInputAfterResume()
++{
++	// Cancel gestures rather than invoking their release actions (drop/sell/use).
++	Cancel3DSButtonAHold();
++	Confirm3DSVisualStoreSale(false);
++	HudTouchDown = false;
++	HudBeltGesture.Cancel();
++	StashItemButton.active = false;
++	StashItemButton.finished = true;
++	CtrConsumedSpellButtons = 0;
++	ControllerActionHeld = GameActionType_NONE;
++	LastPlayerAction = PlayerActionType::None;
++	sgbMouseDown = CLICK_NONE;
++	PadHotspellMenuActive = false;
++	PadMenuNavigatorActive = false;
++	SuppressedButton = ControllerButton_NONE;
++	for (unsigned i = ControllerButton::FIRST; i <= ControllerButton::LAST; ++i)
++		PadmapperRelease(static_cast<ControllerButton>(i), false);
++	leftStickX = leftStickY = rightStickX = rightStickY = 0;
++	leftStickXUnscaled = leftStickYUnscaled = rightStickXUnscaled = rightStickYUnscaled = 0;
++	leftStickNeedsScaling = rightStickNeedsScaling = true;
++	ResetMainPanelButtons();
++	if (MyPlayer != nullptr && gbRunGame && !gbIsMultiplayer)
++		MyPlayer->Stop();
++	RedrawEverything();
++}
++
++void Update3DSStashItemAction()
++{
++	if (!StashItemButton.active || StashItemButton.finished)
++		return;
++	if (!CanFinishStashItemAction()) {
++		StashItemButton.finished = true;
++		return;
++	}
++	if (static_cast<uint32_t>(SDL_GetTicks() - StashItemButton.pressedAt) < 500)
++		return;
++	// Consume the gesture even when the destination is full: releasing Y
++	// after a failed transfer must never turn it into a ground drop.
++	StashItemButton.finished = true;
++	Player &player = *MyPlayer;
++	Item &item = player.HoldItem;
++	const bool placed = StashItemButton.toStash
++	    ? AutoPlaceItemInStash(item, true)
++	    : (item._itype == ItemType::Gold ? GoldAutoPlace(player, item) : AutoPlaceItemInInventory(player, item, true));
++	if (!placed) {
++		player.SaySpecific(HeroSpeech::IHaveNoRoom);
++		return;
++	}
++	item.clear();
++	NewCursor(CURSOR_HAND);
++	PlaySFX(SfxID::GrabItem);
++}
++
++void Cancel3DSButtonAHold()
++{
++	ButtonAHold.active = false;
++	ButtonAHold.triggered = false;
++	ButtonAHold.invItem = -1;
++	ButtonAHold.stashItem = StashStruct::EmptyCell;
++}
++
++void Update3DSButtonAHold()
++{
++	if (!ButtonAHold.active || ButtonAHold.triggered)
++		return;
++
++	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
++	if (!uiOpen) {
++		Cancel3DSButtonAHold();
++		return;
++	}
++
++	if (ButtonAHold.invItem != -1 && pcursinvitem != ButtonAHold.invItem) {
++		Cancel3DSButtonAHold();
++		return;
++	}
++	if (ButtonAHold.stashItem != StashStruct::EmptyCell && pcursstashitem != ButtonAHold.stashItem) {
++		Cancel3DSButtonAHold();
++		return;
++	}
++
++	constexpr uint32_t HoldThresholdMs = 350;
++	if (static_cast<uint32_t>(SDL_GetTicks() - ButtonAHold.pressedAt) < HoldThresholdMs)
++		return;
++
++	ButtonAHold.triggered = true;
++
++	if (IsVisualStoreOpen) {
++		// Selling is an explicit (Y) action with confirmation; holding (A)
++		// must not sell or use an item while browsing a vendor.
++		return;
++	} else if (IsStashOpen && pcursstashitem != StashStruct::EmptyCell) {
++		CtrlUseStashItem();
++	} else if (pcursinvitem != -1) {
++		CtrlUseInvItem();
++	}
++}
++#endif
++
++ControllerButton TranslateTo(GamepadLayout layout, ControllerButton button)
++{
++	if (layout != GamepadLayout::Nintendo)
++		return button;
++
++	switch (button) {
++	case ControllerButton_BUTTON_A:
++		return ControllerButton_BUTTON_B;
++	case ControllerButton_BUTTON_B:
++		return ControllerButton_BUTTON_A;
++	case ControllerButton_BUTTON_X:
++		return ControllerButton_BUTTON_Y;
++	case ControllerButton_BUTTON_Y:
++		return ControllerButton_BUTTON_X;
++	default:
++		return button;
++	}
++}
++
++bool SkipsMovie(ControllerButtonEvent ctrlEvent)
++{
++	return IsAnyOf(ctrlEvent.button,
++	    ControllerButton_BUTTON_A,
++	    ControllerButton_BUTTON_B,
++	    ControllerButton_BUTTON_START,
++	    ControllerButton_BUTTON_BACK);
++}
++
++bool IsSimulatedMouseClickBinding(ControllerButtonEvent ctrlEvent)
++{
++	if (ctrlEvent.button == ControllerButton_NONE)
++		return false;
++	if (!ctrlEvent.up && ctrlEvent.button == SuppressedButton)
++		return false;
++	const std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
++	return IsAnyOf(actionName, "LeftMouseClick1", "LeftMouseClick2", "RightMouseClick1", "RightMouseClick2");
++}
++
++AxisDirection GetMoveDirection()
++{
++	return GetLeftStickOrDpadDirection(true);
++}
++
++bool HandleControllerButtonEvent(const SDL_Event &event, const ControllerButtonEvent ctrlEvent, GameAction &action)
++{
++	if (ctrlEvent.button == ControllerButton_IGNORE) {
++		return false;
++	}
++
++	struct ButtonReleaser {
++		~ButtonReleaser()
++		{
++			if (ctrlEvent.up) PadmapperRelease(ctrlEvent.button, /*invokeAction=*/false);
++		}
++		ControllerButtonEvent ctrlEvent;
++	};
++
++	const ButtonReleaser buttonReleaser { ctrlEvent };
++	const bool isGamepadMotion = IsControllerMotion(event);
++	if (!isGamepadMotion) {
++		SimulateRightStickWithPadmapper(ctrlEvent);
++	}
++	DetectInputMethod(event, ctrlEvent);
++	if (isGamepadMotion) {
++		return true;
++	}
++
++	if (ctrlEvent.button != ControllerButton_NONE && ctrlEvent.button == SuppressedButton) {
++		if (!ctrlEvent.up)
++			return true;
++		SuppressedButton = ControllerButton_NONE;
++	}
++
++#ifdef __3DS__
++	if (ctrlEvent.button == ControllerButton_BUTTON_Y
++	    && (StashItemButton.active || (IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag))) {
++		if (!ctrlEvent.up)
++			PerformSecondaryAction();
++		StashItemButton.active = false;
++		StashItemButton.finished = true;
++		return true;
++	}
++	if (!ctrlEvent.up && ctrlEvent.button != ControllerButton_NONE)
++		StashItemButton.finished = true;
++#endif
++
++	if (ctrlEvent.up && !PadmapperActionNameTriggeredByButtonEvent(ctrlEvent).empty()) {
++		// Button press may have brought up a menu;
++		// don't confuse release of that button with intent to interact with the menu
++
++		// Handle visual store button release for physical gamepad
++		std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
++		if (actionName == "PrimaryAction") {
++			PerformPrimaryActionRelease();
++		}
++
++		PadmapperRelease(ctrlEvent.button, /*invokeAction=*/true);
++		return true;
++	} else if (GetGameAction(event, ctrlEvent, &action)) {
++		ProcessGameAction(action);
++		return true;
++	} else if (ctrlEvent.button != ControllerButton_NONE) {
++#ifdef __3DS__
++		if (ctrlEvent.up)
++			ReleaseControllerButton(ctrlEvent.button);
++		else
++			PressControllerButton(ctrlEvent.button);
++#else
++		if (!ctrlEvent.up)
++			PressControllerButton(ctrlEvent.button);
++#endif
++		return true;
++	}
++
++	return false;
++}
++
++} // namespace devilution
+diff --git a/Source/panels/spell_book.cpp b/Source/panels/spell_book.cpp
+index 28de6ea..d0aff43 100644
+--- a/Source/panels/spell_book.cpp
++++ b/Source/panels/spell_book.cpp
+@@ -1,669 +1,672 @@
+-#include "panels/spell_book.hpp"
+-
+-#ifdef __3DS__
+-#include "platform/ctr/ui.hpp"
+-#include "platform/ctr/pixel_geometry.hpp"
+-#endif
+-
+-#include <algorithm>
+-#include <vector>
+-#include <cstdint>
+-#include <expected>
+-#include <optional>
+-#include <string>
+-
+-#include "control/control.hpp"
+-#include "diablo.h"
+-#include "engine/backbuffer_state.hpp"
+-#include "engine/clx_sprite.hpp"
+-#include "engine/load_cel.hpp"
+-#include "engine/load_clx.hpp"
+-#include "engine/rectangle.hpp"
+-#include "engine/render/clx_render.hpp"
+-#include "engine/render/text_render.hpp"
+-#include "game_mode.hpp"
+-#include "missiles.h"
+-#include "panels/spell_icons.hpp"
+-#include "panels/ui_panels.hpp"
+-#include "player.h"
+-#include "tables/spelldat.h"
+-#include "utils/format.hpp"
+-#include "utils/language.h"
+-#include "utils/status_macros.hpp"
+-
+-namespace devilution {
+-
+-namespace {
+-
+-OptionalOwnedClxSpriteList spellBookButtons;
+-OptionalOwnedClxSpriteList spellBookBackground;
+-
+-const size_t SpellBookPages = 6;
+-const size_t SpellBookPageEntries = 7;
+-
+-constexpr uint16_t SpellBookButtonWidthDiablo = 76;
+-constexpr uint16_t SpellBookButtonWidthHellfire = 61;
+-
+-uint16_t SpellBookButtonWidth()
+-{
+-	return gbIsHellfire ? SpellBookButtonWidthHellfire : SpellBookButtonWidthDiablo;
+-}
+-
+-/** Maps from spellbook page number and position to SpellID. */
+-const SpellID SpellPages[SpellBookPages][SpellBookPageEntries] = {
+-	{ SpellID::Null, SpellID::Firebolt, SpellID::ChargedBolt, SpellID::HolyBolt, SpellID::Healing, SpellID::HealOther, SpellID::Inferno },
+-	{ SpellID::Resurrect, SpellID::FireWall, SpellID::Telekinesis, SpellID::Lightning, SpellID::TownPortal, SpellID::Flash, SpellID::StoneCurse },
+-	{ SpellID::Phasing, SpellID::ManaShield, SpellID::Elemental, SpellID::Fireball, SpellID::FlameWave, SpellID::ChainLightning, SpellID::Guardian },
+-	{ SpellID::Nova, SpellID::Golem, SpellID::Teleport, SpellID::Apocalypse, SpellID::BoneSpirit, SpellID::BloodStar, SpellID::Etherealize },
+-	{ SpellID::LightningWall, SpellID::Immolation, SpellID::Warp, SpellID::Reflect, SpellID::Berserk, SpellID::RingOfFire, SpellID::Search },
+-	{ SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid }
+-};
+-
+-#ifdef __3DS__
+-const std::vector<SpellID> &KnownCtrSpells()
+-{
+-	const Player &player = *InspectPlayer;
+-	const uint64_t known = player._pMemSpells | player._pISpells | player._pAblSpells;
+-	static std::vector<SpellID> result;
+-	static uint64_t cachedKnown = 0;
+-	static SpellID cachedSkill = SpellID::Invalid;
+-	const auto skill = GetPlayerStartingLoadoutForClass(player._pClass).skill;
+-	if (known == cachedKnown && skill == cachedSkill)
+-		return result;
+-	cachedKnown = known;
+-	cachedSkill = skill;
+-	result.clear();
+-	result.reserve(static_cast<size_t>(SpellID::LAST));
+-	const auto append = [&](SpellID spell) {
+-		if (IsValidSpell(spell) && spell != SpellID::Null && (known & GetSpellBitmask(spell)) != 0
+-		    && std::find(result.begin(), result.end(), spell) == result.end())
+-			result.push_back(spell);
+-	};
+-	append(GetPlayerStartingLoadoutForClass(player._pClass).skill);
+-	for (const auto &page : SpellPages)
+-		for (const auto spell : page)
+-			append(spell);
+-	// Include granted abilities and staff spells outside the original fixed pages.
+-	for (int spell = 1; spell <= static_cast<int>(SpellID::LAST); ++spell)
+-		append(static_cast<SpellID>(spell));
+-	return result;
+-}
+-#endif
+-
+-SpellID GetSpellFromSpellPage(size_t page, size_t entry)
+-{
+-#ifdef __3DS__
+-	const auto &spells = KnownCtrSpells();
+-	if (entry >= CtrSpellRowsPerPage || page >= (spells.size() + CtrSpellRowsPerPage - 1) / CtrSpellRowsPerPage)
+-		return SpellID::Invalid;
+-	const size_t index = page * CtrSpellRowsPerPage + entry;
+-	return entry < CtrSpellRowsPerPage && index < spells.size() ? spells[index] : SpellID::Invalid;
+-#else
+-	if (page >= SpellBookPages || entry >= SpellBookPageEntries)
+-		return SpellID::Invalid;
+-	if (page == 0 && entry == 0)
+-		return GetPlayerStartingLoadoutForClass(InspectPlayer->_pClass).skill;
+-	return SpellPages[page][entry];
+-#endif
+-}
+-
+-constexpr Size SpellBookDescription { 250, 43 };
+-constexpr int SpellBookDescriptionPaddingHorizontal = 2;
+-
+-void PrintSBookStr(const Surface &out, Point position, std::string_view text, UiFlags flags = UiFlags::None)
+-{
+-	DrawString(out, text,
+-	    Rectangle(GetPanelPosition(UiPanels::Spell, position + Displacement { SPLICONLENGTH, 0 }),
+-	        SpellBookDescription)
+-	        .inset({ SpellBookDescriptionPaddingHorizontal, 0 }),
+-	    { .flags = UiFlags::ColorWhite | flags });
+-}
+-
+-SpellType GetSBookTrans(SpellID ii, bool townok)
+-{
+-	const Player &player = *InspectPlayer;
+-	if (ii == GetPlayerStartingLoadoutForClass(player._pClass).skill)
+-		return SpellType::Skill;
+-	SpellType st = SpellType::Spell;
+-	if ((player._pISpells & GetSpellBitmask(ii)) != 0) {
+-		st = SpellType::Charges;
+-	}
+-	if ((player._pAblSpells & GetSpellBitmask(ii)) != 0) {
+-		st = SpellType::Skill;
+-	}
+-	if (st == SpellType::Spell) {
+-		if (CheckSpell(*InspectPlayer, ii, st, true) != SpellCheckResult::Success) {
+-			st = SpellType::Invalid;
+-		}
+-		if (player.GetSpellLevel(ii) == 0) {
+-			st = SpellType::Invalid;
+-		}
+-	}
+-	if (townok && leveltype == DTYPE_TOWN && st != SpellType::Invalid && !GetSpellData(ii).isAllowedInTown()) {
+-		st = SpellType::Invalid;
+-	}
+-
+-	return st;
+-}
+-
+-StringOrView GetSpellPowerText(SpellID spell, int spellLevel)
+-{
+-	if (spellLevel == 0) {
+-		return _("Unusable");
+-	}
+-	if (spell == SpellID::BoneSpirit) {
+-		return _(/* TRANSLATORS: UI constraints, keep short please.*/ "Dmg: 1/3 target hp");
+-	}
+-	const auto [min, max] = GetDamageAmt(spell, spellLevel);
+-	if (min == -1) {
+-		return StringOrView {};
+-	}
+-	if (spell == SpellID::Healing || spell == SpellID::HealOther) {
+-		return FormatRuntime(_(/* TRANSLATORS: UI constraints, keep short please.*/ "Heals: {:d} - {:d}"), min, max);
+-	}
+-	return FormatRuntime(_(/* TRANSLATORS: UI constraints, keep short please.*/ "Damage: {:d} - {:d}"), min, max);
+-}
+-
+-#ifdef __3DS__
+-bool bindingOpen = false;
+-SpellID bindingSpell = SpellID::Invalid;
+-SpellType bindingType = SpellType::Invalid;
+-
+-SpellType CtrSpellSource(SpellID spell)
+-{
+-	const auto mask = GetSpellBitmask(spell);
+-	if ((InspectPlayer->_pAblSpells & mask) != 0)
+-		return SpellType::Skill;
+-	if ((InspectPlayer->_pISpells & mask) != 0)
+-		return SpellType::Charges;
+-	return SpellType::Spell;
+-}
+-
+-Rectangle CompactTabRect(int page)
+-{
+-	const int pages = CtrSpellbookPageCount();
+-	const int step = 368 / pages;
+-	return { { 16 + page * step, CtrSpellTabsY }, { step - 4, CtrSpellTabHeight } };
+-}
+-
+-SpellID FocusedCtrSpell()
+-{
+-	const Point point = CtrScreenToTop(MousePosition);
+-	if (point.y >= CtrSpellRowsY && point.y < CtrSpellRowsY + CtrSpellRowsPerPage * CtrSpellRowHeight) {
+-		const auto spell = GetSpellFromSpellPage(SpellbookTab, (point.y - CtrSpellRowsY) / CtrSpellRowHeight);
+-		if (IsValidSpell(spell))
+-			return spell;
+-	}
+-	return GetSpellFromSpellPage(SpellbookTab, 0);
+-}
+-
+-std::string_view SpellDescription(SpellID spell)
+-{
+-	switch (spell) {
+-	case SpellID::Firebolt: return _("Launches a small bolt of fire at an enemy.");
+-	case SpellID::Healing: return _("Restores your life.");
+-	case SpellID::Lightning: return _("Sends lightning through enemies in a line.");
+-	case SpellID::Flash: return _("Blasts enemies standing close to you.");
+-	case SpellID::Identify: return _("Reveals the magical properties of an item.");
+-	case SpellID::FireWall: return _("Creates a burning wall that hurts creatures crossing it.");
+-	case SpellID::TownPortal: return _("Opens a portal between the dungeon and town.");
+-	case SpellID::StoneCurse: return _("Turns an enemy to stone for a short time.");
+-	case SpellID::Infravision: return _("Reveals nearby creatures, even behind walls.");
+-	case SpellID::Phasing: return _("Teleports you a short distance to a random location.");
+-	case SpellID::ManaShield: return _("Uses mana to absorb damage instead of life.");
+-	case SpellID::Fireball: return _("Fires an exploding ball of fire.");
+-	case SpellID::Guardian: return _("Summons a guardian that spits fire at nearby enemies.");
+-	case SpellID::ChainLightning: return _("Sends bolts of lightning toward nearby enemies.");
+-	case SpellID::FlameWave: return _("Sweeps a wide wave of fire across the dungeon.");
+-	case SpellID::Nova: return _("Releases lightning in all directions.");
+-	case SpellID::Inferno: return _("Projects a short stream of fire.");
+-	case SpellID::Golem: return _("Summons a stone ally to fight for you.");
+-	case SpellID::Rage: return _("Temporarily boosts your fighting power, followed by exhaustion.");
+-	case SpellID::Teleport: return _("Moves you instantly to the selected location.");
+-	case SpellID::Apocalypse: return _("Strikes nearby enemies with powerful explosions.");
+-	case SpellID::Etherealize: return _("Temporarily makes you immune to physical attacks.");
+-	case SpellID::ItemRepair: return _("Repairs equipment, but may reduce its maximum durability.");
+-	case SpellID::StaffRecharge: return _("Restores staff charges, but may reduce its maximum charges.");
+-	case SpellID::TrapDisarm: return _("Attempts to disarm a trap.");
+-	case SpellID::Elemental: return _("Sends a fiery elemental toward an enemy.");
+-	case SpellID::ChargedBolt: return _("Releases several wandering sparks of lightning.");
+-	case SpellID::HolyBolt: return _("Fires a holy bolt effective against undead.");
+-	case SpellID::Resurrect: return _("Revives another player who has died.");
+-	case SpellID::Telekinesis: return _("Interacts with a distant item, door or object.");
+-	case SpellID::HealOther: return _("Restores another player's life.");
+-	case SpellID::BloodStar: return _("Fires a magical star, consuming mana and some life.");
+-	case SpellID::BoneSpirit: return _("Damages an enemy for a third of its current life.");
+-	case SpellID::Mana: return _("Restores mana.");
+-	case SpellID::Magi: return _("Fully restores mana.");
+-	case SpellID::Jester: return _("Unleashes an unpredictable magical effect.");
+-	case SpellID::LightningWall: return _("Creates a wall of crackling lightning.");
+-	case SpellID::Immolation: return _("Releases fireballs in all directions.");
+-	case SpellID::Warp: return _("Teleports you toward the nearest stairs.");
+-	case SpellID::Reflect: return _("Reflects some melee damage back at attackers.");
+-	case SpellID::Berserk: return _("Turns a monster against other monsters.");
+-	case SpellID::RingOfFire: return _("Creates a ring of fire around you.");
+-	case SpellID::Search: return _("Highlights nearby items on the ground.");
+-	case SpellID::RuneOfFire: return _("Places a fire trap on the ground.");
+-	case SpellID::RuneOfLight: return _("Places a lightning trap on the ground.");
+-	case SpellID::RuneOfNova: return _("Places a trap that releases a lightning nova.");
+-	case SpellID::RuneOfImmolation: return _("Places a trap that launches fireballs.");
+-	case SpellID::RuneOfStone: return _("Places a trap that turns its victim to stone.");
+-	default: return _("Select a spell or skill to see its description.");
+-	}
+-}
+-
+-std::string CtrSpellShortcutText(SpellID spell, SpellType type)
+-{
+-	constexpr const char *labels[] = { "(X)", "(Y)", "(L)", "(R)" };
+-	const Player &player = *InspectPlayer;
+-	std::string result;
+-	for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
+-		const SpellID assigned = slot == 0 ? player._pRSpell : player._pSplHotKey[slot];
+-		const SpellType source = slot == 0 ? player._pRSplType : player._pSplTHotKey[slot];
+-		if (assigned != spell || source != type)
+-			continue;
+-		if (!result.empty()) result += ' ';
+-		result += labels[slot];
+-	}
+-	return result;
+-}
+-
+-void DrawCtrBinding(const Surface &out)
+-{
+-	DrawCtrPanelBackground(out, CtrPanelBackground::SpellBinding);
+-	DrawString(out, _("Choose a button to bind a skill or spell"), { { 16, CtrPanelTitleY }, { 368, 16 } },
+-	    { .flags = UiFlags::ColorWhitegold | UiFlags::AlignCenter, .spacing = 0 });
+-	DrawString(out, pgettext("spell", GetSpellData(bindingSpell).sNameText), { { 16, 48 }, { 368, 14 } },
+-	    { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter, .spacing = 0 });
+-	const int hoveredSlot = CtrSpellBindingHit(CtrScreenToTop(MousePosition));
+-	constexpr const char *labels[] = { "(X)", "(Y)", "(L)", "(R)" };
+-	for (size_t slot = 0; slot < CtrSpellShortcutCount; ++slot) {
+-		const Point p = CtrSpellBindingPositions[slot];
+-		FillRect(out, p.x, p.y, 37, 38, 0);
+-		SpellID spell = InspectPlayer->_pSplHotKey[slot];
+-		SpellType type = InspectPlayer->_pSplTHotKey[slot];
+-		if (slot == 0) {
+-			spell = InspectPlayer->_pRSpell;
+-			type = InspectPlayer->_pRSplType;
+-		}
+-		if (IsValidSpell(spell)) {
+-			SetSpellTrans(type);
+-			DrawSmallSpellIcon(out, p + Displacement { 0, 37 }, spell);
+-		}
+-		if (static_cast<int>(slot) == hoveredSlot) {
+-			DrawHalfTransparentRectTo(out, p.x, p.y, 37, 38, PAL16_RED + 7);
+-			UnsafeDrawBorder2px(out, CtrSpellBindingRect(slot), PAL16_RED + 3);
+-		}
+-		DrawString(out, labels[slot], { { p.x - 14, p.y + 41 }, { 65, 16 } },
+-		    { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter });
+-	}
+-	DrawString(out, _("(A) Assign    (B) Cancel"), { { 16, 201 }, { 368, 16 } }, { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter });
+-}
+-
+-void DrawSpellBook3DS(const Surface &out)
+-{
+-	DrawCtrPanelBackground(out, CtrPanelBackground::Spells);
+-	SpellbookTab = std::clamp(SpellbookTab, 0, CtrSpellbookPageCount() - 1);
+-	if (bindingOpen) {
+-		DrawCtrBinding(out);
+-		return;
+-	}
+-	// Remove the artwork's original fixed page frames; draw only populated pages.
+-	out.BlitFrom(out, MakeSdlRect(10, 180, 380, 23), { 10, CtrSpellTabsY - 3 });
+-	DrawString(out, _("Spells & Skills"), { { 20, CtrPanelTitleY }, { 360, 14 } },
+-	    { .flags = UiFlags::AlignCenter | UiFlags::ColorWhitegold });
+-	DrawString(out, _("Press (A) to bind"), { { 20, 38 }, { 360, 14 } },
+-	    { .flags = UiFlags::AlignCenter | UiFlags::ColorWhite, .spacing = 0 });
+-	const Player &player = *InspectPlayer;
+-	const uint64_t spells = player._pMemSpells | player._pISpells | player._pAblSpells;
+-	constexpr int iconX = 22;
+-	constexpr int nameX = 58;
+-	const int nameWidth = 378 - nameX;
+-	const int detailWidth = nameWidth / 2 - 2;
+-	for (size_t entry = 0; entry < CtrSpellRowsPerPage; ++entry) {
+-		const SpellID spell = GetSpellFromSpellPage(SpellbookTab, entry);
+-		const int y = CtrSpellRowsY + entry * CtrSpellRowHeight;
+-		if (!IsValidSpell(spell) || (spells & GetSpellBitmask(spell)) == 0)
+-			continue;
+-		const SpellType type = GetSBookTrans(spell, true);
+-		const bool selected = spell == FocusedCtrSpell() && !IsInspectingPlayer();
+-		if (selected)
+-			DrawHalfTransparentRectTo(out, 20, y, 360, CtrSpellRowHeight, PAL16_RED + 7);
+-		const Surface icon = SidePanelBuffer->subregion(0, 0, 40, 40);
+-		FillRect(icon, 0, 0, 40, 40, 0);
+-		SetSpellTrans(type);
+-		DrawSmallSpellIcon(icon, { 0, 37 }, spell);
+-		if (selected) {
+-			SetSpellTrans(SpellType::Skill);
+-			DrawSmallSpellIconBorder(icon, { 0, 37 });
+-		}
+-		out.ScaleBlitFrom(icon, MakeSdlRect(0, 0, 37, 38), MakeSdlRect(iconX, y + 3, 26, 27));
+-		const SpellType infoType = CtrSpellSource(spell);
+-		std::string name { pgettext("spell", GetSpellData(spell).sNameText) };
+-		const std::string wrappedName = WordWrapString(name, nameWidth, GameFont12, 0);
+-		const int detailsY = y + (wrappedName.find('\n') == std::string::npos ? 12 : 24);
+-		DrawString(out, wrappedName, { { nameX, y }, { nameWidth, 24 } },
+-		    { .flags = UiFlags::ColorWhite, .spacing = 0, .lineHeight = 12 });
+-		if (infoType == SpellType::Skill) {
+-			DrawString(out, _("Skill"), { { nameX, detailsY }, { nameWidth, 12 } }, { .flags = UiFlags::ColorWhitegold });
+-		} else if (infoType == SpellType::Charges) {
+-			const int charges = player.InvBody[INVLOC_HAND_LEFT]._iCharges;
+-			DrawString(out, FormatRuntime(ngettext("Staff ({:d} charge)", "Staff ({:d} charges)", charges), charges), { { nameX, detailsY }, { nameWidth, 12 } }, { .flags = UiFlags::ColorWhitegold });
+-		} else {
+-			const int level = player.GetSpellLevel(spell);
+-			DrawString(out, FormatRuntime(_("Lv {:d} · Mana: {:d}"), level, GetManaAmount(player, spell) >> 6), { { nameX, detailsY }, { detailWidth, 12 } }, { .flags = UiFlags::ColorWhitegold | UiFlags::KerningFitSpacing, .spacing = 0 });
+-			const StringOrView power = GetSpellPowerText(spell, level);
+-			DrawString(out, power, { { nameX + detailWidth + 4, detailsY }, { nameWidth - detailWidth - 4, 12 } }, { .flags = UiFlags::ColorWhitegold | UiFlags::AlignRight | UiFlags::KerningFitSpacing, .spacing = 0 });
+-		}
+-	}
+-	const int pages = CtrSpellbookPageCount();
+-	for (int page = 0; page < pages; ++page) {
+-		const Rectangle button = CompactTabRect(page);
+-		// Two 50% black blends leave roughly a quarter of the original stone
+-		// visible through the tab, without painting over the supplied frame.
+-		DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height);
+-		DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height);
+-		if (page == SpellbookTab)
+-			DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height, PAL16_RED + 10);
+-		{
+-			DrawHorizontalLine(out, button.position, button.size.width, PAL16_BEIGE + 10);
+-			DrawVerticalLine(out, button.position, button.size.height, PAL16_BEIGE + 10);
+-			DrawHorizontalLine(out, button.position + Displacement { 0, button.size.height - 1 }, button.size.width, PAL16_BEIGE + 3);
+-			DrawVerticalLine(out, button.position + Displacement { button.size.width - 1, 0 }, button.size.height, PAL16_BEIGE + 3);
+-		}
+-		DrawString(out, std::to_string(page + 1), button, { .flags = UiFlags::AlignCenter | UiFlags::VerticalCenter | UiFlags::ColorWhite });
+-	}
+-}
+-#endif
+-
+-} // namespace
+-
+-#ifdef __3DS__
+-int CtrSpellbookPageCount()
+-{
+-	return std::max(1, static_cast<int>((KnownCtrSpells().size() + CtrSpellRowsPerPage - 1) / CtrSpellRowsPerPage));
+-}
+-
+-int CtrSpellbookRowCount()
+-{
+-	const int count = static_cast<int>(KnownCtrSpells().size());
+-	return std::clamp(count - SpellbookTab * CtrSpellRowsPerPage, 0, CtrSpellRowsPerPage);
+-}
+-
+-bool CtrSpellBindingActive()
+-{
+-	return bindingOpen;
+-}
+-
+-void MoveCtrSpellBinding(AxisDirection direction)
+-{
+-	const int current = CtrSpellBindingHit(CtrScreenToTop(MousePosition));
+-	if (direction.x == AxisDirectionX_NONE && direction.y == AxisDirectionY_NONE)
+-		return;
+-	int next = current < 0 ? 0 : current;
+-	if (current >= 0) {
+-		const Point origin = CtrSpellBindingPositions[current];
+-		int bestScore = 100000;
+-		for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
+-			const Point p = CtrSpellBindingPositions[slot];
+-			const int dx = p.x - origin.x;
+-			const int dy = p.y - origin.y;
+-			if (direction.y != AxisDirectionY_NONE) {
+-				if ((direction.y == AxisDirectionY_UP && dy >= 0)
+-				    || (direction.y == AxisDirectionY_DOWN && dy <= 0))
+-					continue;
+-			} else if (dy != 0 || (direction.x == AxisDirectionX_LEFT && dx >= 0)
+-			    || (direction.x == AxisDirectionX_RIGHT && dx <= 0)) {
+-				continue;
+-			}
+-			const int score = dx * dx + dy * dy;
+-			if (score < bestScore) {
+-				bestScore = score;
+-				next = slot;
+-			}
+-		}
+-	}
+-	SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(next).Center()));
+-}
+-
+-int CtrSpellBindingSlot(ControllerButton button, bool modifierHeld)
+-{
+-	// Shoulder buttons are independent spell shortcuts, never modifiers.
+-	(void)modifierHeld;
+-	switch (button) {
+-	case ControllerButton_BUTTON_X: return 0;
+-	case ControllerButton_BUTTON_Y: return 1;
+-	case ControllerButton_BUTTON_LEFTSHOULDER: return 2;
+-	case ControllerButton_BUTTON_RIGHTSHOULDER: return 3;
+-	default: return -1;
+-	}
+-}
+-
+-bool HandleCtrSpellBinding(ControllerButton button, bool modifierHeld)
+-{
+-	if (!SpellbookFlag || IsInspectingPlayer()) {
+-		bindingOpen = false;
+-		return false;
+-	}
+-	if (!bindingOpen) {
+-		if (button == ControllerButton_BUTTON_Y) return true;
+-		if (button != ControllerButton_BUTTON_A)
+-			return false;
+-		bindingSpell = FocusedCtrSpell();
+-		if (IsValidSpell(bindingSpell)) {
+-			bindingType = CtrSpellSource(bindingSpell);
+-			bindingOpen = true;
+-			SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(0).Center()));
+-		}
+-		return true;
+-	}
+-	const int slot = button == ControllerButton_BUTTON_A
+-	    ? CtrSpellBindingHit(CtrScreenToTop(MousePosition))
+-	    : CtrSpellBindingSlot(button, modifierHeld);
+-	if (slot >= 0) {
+-		MyPlayer->_pSplHotKey[slot] = bindingSpell;
+-		MyPlayer->_pSplTHotKey[slot] = bindingType;
+-		if (slot == 0) {
+-			MyPlayer->_pRSpell = bindingSpell;
+-			MyPlayer->_pRSplType = bindingType;
+-		}
+-		// Existing per-character hotkey serialization persists these four slots.
+-		bindingOpen = false;
+-		RedrawEverything();
+-	} else if (button == ControllerButton_BUTTON_B || button == ControllerButton_BUTTON_BACK) {
+-		bindingOpen = false;
+-	}
+-	return true;
+-}
+-
+-void DrawCtrHudSpellIcons(const Surface &out)
+-{
+-	static std::optional<OwnedSurface> icon;
+-	if (!icon) icon.emplace(37, 38);
+-	const Player &player = *MyPlayer;
+-	for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
+-		const SpellID spell = slot == 0 ? player._pRSpell : player._pSplHotKey[slot];
+-		SpellType type = slot == 0 ? player._pRSplType : player._pSplTHotKey[slot];
+-		if (!IsValidSpell(spell)) continue;
+-		const uint64_t owned = type == SpellType::Skill ? player._pAblSpells
+-		    : type == SpellType::Spell ? player._pMemSpells
+-		    : type == SpellType::Charges ? player._pISpells
+-		    : type == SpellType::Scroll ? player._pScrlSpells : 0;
+-		if ((owned & GetSpellBitmask(spell)) == 0
+-		    || (type == SpellType::Spell && CheckSpell(player, spell, type, true) != SpellCheckResult::Success)
+-		    || (leveltype == DTYPE_TOWN && !GetSpellData(spell).isAllowedInTown()))
+-			type = SpellType::Invalid;
+-		FillRect(*icon, 0, 0, 37, 38, 0);
+-		SetSpellTrans(type);
+-		DrawSmallSpellIcon(*icon, { 0, 37 }, spell);
+-		const Rectangle target = CtrHudSpellSlot(slot);
+-		const Size size = CtrEnlargeImage({ 37, 38 }, target.size);
+-		out.ScaleBlitFrom(*icon, MakeSdlRect(0, 0, 37, 38),
+-		    MakeSdlRect(target.position.x + (target.size.width - size.width) / 2,
+-		        target.position.y, size.width, size.height));
+-	}
+-}
+-
+-void DrawCtrSpellDescription(const Surface &out)
+-{
+-	const Rectangle box = CtrBottomInfoBox;
+-	FillRect(out, box.position.x, box.position.y, box.size.width, box.size.height, 0);
+-	const SpellID spell = bindingOpen ? bindingSpell : FocusedCtrSpell();
+-	const std::string text = WordWrapString(SpellDescription(spell), box.size.width - 12, GameFont12, 0);
+-	DrawString(out, text, box.inset({ 6, 6 }), { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter | UiFlags::VerticalCenter, .spacing = 0 });
+-}
+-#endif
+-
+-std::expected<void, std::string> InitSpellBook()
+-{
+-	ASSIGN_OR_RETURN(spellBookBackground, LoadCelWithStatus("data\\spellbk", static_cast<uint16_t>(SidePanelSize.width)));
+-	ASSIGN_OR_RETURN(spellBookButtons, LoadCelWithStatus("data\\spellbkb", SpellBookButtonWidth()));
+-	return LoadSmallSpellIcons();
+-}
+-
+-void FreeSpellBook()
+-{
+-#ifdef __3DS__
+-	bindingOpen = false;
+-#endif
+-	FreeSmallSpellIcons();
+-	spellBookButtons = std::nullopt;
+-	spellBookBackground = std::nullopt;
+-}
+-
+-void DrawSpellBook(const Surface &out)
+-{
+-#ifdef __3DS__
+-	DrawSpellBook3DS(out);
+-	return;
+-#endif
+-	constexpr int SpellBookButtonX = 7;
+-	constexpr int SpellBookButtonY = 348;
+-	ClxDraw(out, GetPanelPosition(UiPanels::Spell, { 0, 351 }), (*spellBookBackground)[0]);
+-	const int buttonX = gbIsHellfire && SpellbookTab < 5
+-	    ? SpellBookButtonWidthHellfire * SpellbookTab
+-	    : (SpellBookButtonWidthDiablo * SpellbookTab)
+-	        // BUGFIX: rendering of page 3 and page 4 buttons are both off-by-one pixel (fixed).
+-	        + (SpellbookTab == 2 || SpellbookTab == 3 ? 1 : 0);
+-
+-	ClxDraw(out, GetPanelPosition(UiPanels::Spell, { SpellBookButtonX + buttonX, SpellBookButtonY }), (*spellBookButtons)[SpellbookTab]);
+-	const Player &player = *InspectPlayer;
+-	const uint64_t spl = player._pMemSpells | player._pISpells | player._pAblSpells;
+-
+-	const int lineHeight = 18;
+-
+-	int yp = 12;
+-	const int textPaddingTop = 7;
+-	for (size_t pageEntry = 0; pageEntry < SpellBookPageEntries; pageEntry++) {
+-		const SpellID sn = GetSpellFromSpellPage(SpellbookTab, pageEntry);
+-		if (IsValidSpell(sn) && (spl & GetSpellBitmask(sn)) != 0) {
+-			const SpellType st = GetSBookTrans(sn, true);
+-			SetSpellTrans(st);
+-			const Point spellCellPosition = GetPanelPosition(UiPanels::Spell, { 11, yp + SpellBookDescription.height });
+-			DrawSmallSpellIcon(out, spellCellPosition, sn);
+-			if (sn == player._pRSpell && st == player._pRSplType && !IsInspectingPlayer()) {
+-				SetSpellTrans(SpellType::Skill);
+-				DrawSmallSpellIconBorder(out, spellCellPosition);
+-			}
+-
+-			const Point line0 { 0, yp + textPaddingTop };
+-			const Point line1 { 0, yp + textPaddingTop + lineHeight };
+-			PrintSBookStr(out, line0, pgettext("spell", GetSpellData(sn).sNameText));
+-			switch (GetSBookTrans(sn, false)) {
+-			case SpellType::Skill:
+-				PrintSBookStr(out, line1, _("Skill"));
+-				break;
+-			case SpellType::Charges: {
+-				const int charges = player.InvBody[INVLOC_HAND_LEFT]._iCharges;
+-				PrintSBookStr(out, line1, FormatRuntime(ngettext("Staff ({:d} charge)", "Staff ({:d} charges)", charges), charges));
+-			} break;
+-			default: {
+-				const int mana = GetManaAmount(player, sn) >> 6;
+-				const int lvl = player.GetSpellLevel(sn);
+-				PrintSBookStr(out, line0, FormatRuntime(pgettext(/* TRANSLATORS: UI constraints, keep short please.*/ "spellbook", "Level {:d}"), lvl), UiFlags::AlignRight);
+-				if (const StringOrView text = GetSpellPowerText(sn, lvl); !text.empty()) {
+-					PrintSBookStr(out, line1, text, UiFlags::AlignRight);
+-				}
+-				PrintSBookStr(out, line1, FormatRuntime(pgettext(/* TRANSLATORS: UI constraints, keep short please.*/ "spellbook", "Mana: {:d}"), mana));
+-			} break;
+-			}
+-		}
+-		yp += SpellBookDescription.height;
+-	}
+-}
+-
+-void CheckSBook()
+-{
+-#ifdef __3DS__
+-	Point mousePos = CtrScreenToTop(MousePosition);
+-#else
+-	Point mousePos = MousePosition;
+-#endif
+-
+-	// Icons are drawn in a column near the left side of the panel and aligned with the spell book description entries
+-	// Spell icons/buttons are 37x38 pixels, laid out from 11,18 with a 5 pixel margin between each icon. This is close
+-	// enough to the height of the space given to spell descriptions that we can reuse that value and subtract the
+-	// padding from the end of the area.
+-#ifdef __3DS__
+-	if (bindingOpen)
+-		return;
+-	const Rectangle iconArea { { 20, CtrSpellRowsY }, { 360, CtrSpellRowHeight * CtrSpellRowsPerPage } };
+-	constexpr int rowHeight = CtrSpellRowHeight;
+-#else
+-	const Rectangle iconArea = { GetPanelPosition(UiPanels::Spell, { 11, 18 }), Size { 37, (SpellBookDescription.height * 7) - 5 } };
+-	constexpr int rowHeight = SpellBookDescription.height;
+-#endif
+-	if (iconArea.contains(mousePos) && !IsInspectingPlayer()) {
+-		const SpellID sn = GetSpellFromSpellPage(SpellbookTab, (mousePos.y - iconArea.position.y) / rowHeight);
+-		Player &player = *InspectPlayer;
+-		const uint64_t spl = player._pMemSpells | player._pISpells | player._pAblSpells;
+-		if (IsValidSpell(sn) && (spl & GetSpellBitmask(sn)) != 0) {
+-			SpellType st = SpellType::Spell;
+-			if ((player._pISpells & GetSpellBitmask(sn)) != 0) {
+-				st = SpellType::Charges;
+-			}
+-			if ((player._pAblSpells & GetSpellBitmask(sn)) != 0) {
+-				st = SpellType::Skill;
+-			}
+-#ifdef __3DS__
+-			bindingSpell = sn;
+-			bindingType = st;
+-			bindingOpen = true;
+-			SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(0).Center()));
+-#else
+-			player._pRSpell = sn;
+-			player._pRSplType = st;
+-#endif
+-			RedrawEverything();
+-		}
+-		return;
+-	}
+-
+-	// The width of the panel excluding the border is 305 pixels. This does not cleanly divide by 4 meaning Diablo tabs
+-	// end up with an extra pixel somewhere around the buttons. Vanilla Diablo had the buttons left-aligned, devilutionX
+-	// instead justifies the buttons and puts the gap between buttons 2/3. See DrawSpellBook
+-#ifdef __3DS__
+-	for (int page = 0; page < CtrSpellbookPageCount(); ++page) {
+-		if (CompactTabRect(page).contains(mousePos)) {
+-			SpellbookTab = page;
+-			break;
+-		}
+-	}
+-	return;
+-#else
+-	const int buttonWidth = SpellBookButtonWidth();
+-	// Tabs are drawn in a row near the bottom of the panel
+-	const Rectangle tabArea = { GetPanelPosition(UiPanels::Spell, { 7, 320 }), Size { 305, 29 } };
+-	if (tabArea.contains(mousePos)) {
+-		int hitColumn = mousePos.x - tabArea.position.x;
+-		// Clicking on the gutter currently activates tab 3. Could make it do nothing by checking for == here and return early.
+-		if (!gbIsHellfire && hitColumn > buttonWidth * 2) {
+-			// Subtract 1 pixel to account for the gutter between buttons 2/3
+-			hitColumn--;
+-		}
+-		SpellbookTab = hitColumn / buttonWidth;
+-	}
+-#endif
+-}
+-
+-} // namespace devilution
++#include "panels/spell_book.hpp"
++
++#ifdef __3DS__
++#include "platform/ctr/ui.hpp"
++#include "platform/ctr/pixel_geometry.hpp"
++#endif
++
++#include <algorithm>
++#include <vector>
++#include <cstdint>
++#include <expected>
++#include <optional>
++#include <string>
++
++#include "control/control.hpp"
++#include "diablo.h"
++#include "engine/backbuffer_state.hpp"
++#include "engine/clx_sprite.hpp"
++#include "engine/load_cel.hpp"
++#include "engine/load_clx.hpp"
++#include "engine/rectangle.hpp"
++#include "engine/render/clx_render.hpp"
++#include "engine/render/text_render.hpp"
++#include "game_mode.hpp"
++#include "missiles.h"
++#include "panels/spell_icons.hpp"
++#include "panels/ui_panels.hpp"
++#include "player.h"
++#include "tables/spelldat.h"
++#include "utils/format.hpp"
++#include "utils/language.h"
++#include "utils/status_macros.hpp"
++
++namespace devilution {
++
++namespace {
++
++OptionalOwnedClxSpriteList spellBookButtons;
++OptionalOwnedClxSpriteList spellBookBackground;
++
++const size_t SpellBookPages = 6;
++const size_t SpellBookPageEntries = 7;
++
++constexpr uint16_t SpellBookButtonWidthDiablo = 76;
++constexpr uint16_t SpellBookButtonWidthHellfire = 61;
++
++uint16_t SpellBookButtonWidth()
++{
++	return gbIsHellfire ? SpellBookButtonWidthHellfire : SpellBookButtonWidthDiablo;
++}
++
++/** Maps from spellbook page number and position to SpellID. */
++const SpellID SpellPages[SpellBookPages][SpellBookPageEntries] = {
++	{ SpellID::Null, SpellID::Firebolt, SpellID::ChargedBolt, SpellID::HolyBolt, SpellID::Healing, SpellID::HealOther, SpellID::Inferno },
++	{ SpellID::Resurrect, SpellID::FireWall, SpellID::Telekinesis, SpellID::Lightning, SpellID::TownPortal, SpellID::Flash, SpellID::StoneCurse },
++	{ SpellID::Phasing, SpellID::ManaShield, SpellID::Elemental, SpellID::Fireball, SpellID::FlameWave, SpellID::ChainLightning, SpellID::Guardian },
++	{ SpellID::Nova, SpellID::Golem, SpellID::Teleport, SpellID::Apocalypse, SpellID::BoneSpirit, SpellID::BloodStar, SpellID::Etherealize },
++	{ SpellID::LightningWall, SpellID::Immolation, SpellID::Warp, SpellID::Reflect, SpellID::Berserk, SpellID::RingOfFire, SpellID::Search },
++	{ SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid, SpellID::Invalid }
++};
++
++#ifdef __3DS__
++const std::vector<SpellID> &KnownCtrSpells()
++{
++	const Player &player = *InspectPlayer;
++	const uint64_t known = player._pMemSpells | player._pISpells | player._pAblSpells;
++	static std::vector<SpellID> result;
++	static uint64_t cachedKnown = 0;
++	static SpellID cachedSkill = SpellID::Invalid;
++	const auto skill = GetPlayerStartingLoadoutForClass(player._pClass).skill;
++	if (known == cachedKnown && skill == cachedSkill)
++		return result;
++	cachedKnown = known;
++	cachedSkill = skill;
++	result.clear();
++	result.reserve(static_cast<size_t>(SpellID::LAST));
++	const auto append = [&](SpellID spell) {
++		if (IsValidSpell(spell) && spell != SpellID::Null && (known & GetSpellBitmask(spell)) != 0
++		    && std::find(result.begin(), result.end(), spell) == result.end())
++			result.push_back(spell);
++	};
++	append(GetPlayerStartingLoadoutForClass(player._pClass).skill);
++	for (const auto &page : SpellPages)
++		for (const auto spell : page)
++			append(spell);
++	// Include granted abilities and staff spells outside the original fixed pages.
++	for (int spell = 1; spell <= static_cast<int>(SpellID::LAST); ++spell)
++		append(static_cast<SpellID>(spell));
++	return result;
++}
++#endif
++
++SpellID GetSpellFromSpellPage(size_t page, size_t entry)
++{
++#ifdef __3DS__
++	const auto &spells = KnownCtrSpells();
++	if (entry >= CtrSpellRowsPerPage || page >= (spells.size() + CtrSpellRowsPerPage - 1) / CtrSpellRowsPerPage)
++		return SpellID::Invalid;
++	const size_t index = page * CtrSpellRowsPerPage + entry;
++	return entry < CtrSpellRowsPerPage && index < spells.size() ? spells[index] : SpellID::Invalid;
++#else
++	if (page >= SpellBookPages || entry >= SpellBookPageEntries)
++		return SpellID::Invalid;
++	if (page == 0 && entry == 0)
++		return GetPlayerStartingLoadoutForClass(InspectPlayer->_pClass).skill;
++	return SpellPages[page][entry];
++#endif
++}
++
++constexpr Size SpellBookDescription { 250, 43 };
++constexpr int SpellBookDescriptionPaddingHorizontal = 2;
++
++void PrintSBookStr(const Surface &out, Point position, std::string_view text, UiFlags flags = UiFlags::None)
++{
++	DrawString(out, text,
++	    Rectangle(GetPanelPosition(UiPanels::Spell, position + Displacement { SPLICONLENGTH, 0 }),
++	        SpellBookDescription)
++	        .inset({ SpellBookDescriptionPaddingHorizontal, 0 }),
++	    { .flags = UiFlags::ColorWhite | flags });
++}
++
++SpellType GetSBookTrans(SpellID ii, bool townok)
++{
++	const Player &player = *InspectPlayer;
++	if (ii == GetPlayerStartingLoadoutForClass(player._pClass).skill)
++		return SpellType::Skill;
++	SpellType st = SpellType::Spell;
++	if ((player._pISpells & GetSpellBitmask(ii)) != 0) {
++		st = SpellType::Charges;
++	}
++	if ((player._pAblSpells & GetSpellBitmask(ii)) != 0) {
++		st = SpellType::Skill;
++	}
++	if (st == SpellType::Spell) {
++		if (CheckSpell(*InspectPlayer, ii, st, true) != SpellCheckResult::Success) {
++			st = SpellType::Invalid;
++		}
++		if (player.GetSpellLevel(ii) == 0) {
++			st = SpellType::Invalid;
++		}
++	}
++	if (townok && leveltype == DTYPE_TOWN && st != SpellType::Invalid && !GetSpellData(ii).isAllowedInTown()) {
++		st = SpellType::Invalid;
++	}
++
++	return st;
++}
++
++StringOrView GetSpellPowerText(SpellID spell, int spellLevel)
++{
++	if (spellLevel == 0) {
++		return _("Unusable");
++	}
++	if (spell == SpellID::BoneSpirit) {
++		return _(/* TRANSLATORS: UI constraints, keep short please.*/ "Dmg: 1/3 target hp");
++	}
++	const auto [min, max] = GetDamageAmt(spell, spellLevel);
++	if (min == -1) {
++		return StringOrView {};
++	}
++	if (spell == SpellID::Healing || spell == SpellID::HealOther) {
++		return FormatRuntime(_(/* TRANSLATORS: UI constraints, keep short please.*/ "Heals: {:d} - {:d}"), min, max);
++	}
++	return FormatRuntime(_(/* TRANSLATORS: UI constraints, keep short please.*/ "Damage: {:d} - {:d}"), min, max);
++}
++
++#ifdef __3DS__
++bool bindingOpen = false;
++SpellID bindingSpell = SpellID::Invalid;
++SpellType bindingType = SpellType::Invalid;
++
++SpellType CtrSpellSource(SpellID spell)
++{
++	const auto mask = GetSpellBitmask(spell);
++	if ((InspectPlayer->_pAblSpells & mask) != 0)
++		return SpellType::Skill;
++	if ((InspectPlayer->_pISpells & mask) != 0)
++		return SpellType::Charges;
++	return SpellType::Spell;
++}
++
++Rectangle CompactTabRect(int page)
++{
++	const int pages = CtrSpellbookPageCount();
++	const int step = 368 / pages;
++	return { { 16 + page * step, CtrSpellTabsY }, { step - 4, CtrSpellTabHeight } };
++}
++
++SpellID FocusedCtrSpell()
++{
++	const Point point = CtrScreenToTop(MousePosition);
++	if (point.y >= CtrSpellRowsY && point.y < CtrSpellRowsY + CtrSpellRowsPerPage * CtrSpellRowHeight) {
++		const auto spell = GetSpellFromSpellPage(SpellbookTab, (point.y - CtrSpellRowsY) / CtrSpellRowHeight);
++		if (IsValidSpell(spell))
++			return spell;
++	}
++	return GetSpellFromSpellPage(SpellbookTab, 0);
++}
++
++std::string_view SpellDescription(SpellID spell)
++{
++	switch (spell) {
++	case SpellID::Firebolt: return _("Launches a small bolt of fire at an enemy.");
++	case SpellID::Healing: return _("Restores your life.");
++	case SpellID::Lightning: return _("Sends lightning through enemies in a line.");
++	case SpellID::Flash: return _("Blasts enemies standing close to you.");
++	case SpellID::Identify: return _("Reveals the magical properties of an item.");
++	case SpellID::FireWall: return _("Creates a burning wall that hurts creatures crossing it.");
++	case SpellID::TownPortal: return _("Opens a portal between the dungeon and town.");
++	case SpellID::StoneCurse: return _("Turns an enemy to stone for a short time.");
++	case SpellID::Infravision: return _("Reveals nearby creatures, even behind walls.");
++	case SpellID::Phasing: return _("Teleports you a short distance to a random location.");
++	case SpellID::ManaShield: return _("Uses mana to absorb damage instead of life.");
++	case SpellID::Fireball: return _("Fires an exploding ball of fire.");
++	case SpellID::Guardian: return _("Summons a guardian that spits fire at nearby enemies.");
++	case SpellID::ChainLightning: return _("Sends bolts of lightning toward nearby enemies.");
++	case SpellID::FlameWave: return _("Sweeps a wide wave of fire across the dungeon.");
++	case SpellID::Nova: return _("Releases lightning in all directions.");
++	case SpellID::Inferno: return _("Projects a short stream of fire.");
++	case SpellID::Golem: return _("Summons a stone ally to fight for you.");
++	case SpellID::Rage: return _("Temporarily boosts your fighting power, followed by exhaustion.");
++	case SpellID::Teleport: return _("Moves you instantly to the selected location.");
++	case SpellID::Apocalypse: return _("Strikes nearby enemies with powerful explosions.");
++	case SpellID::Etherealize: return _("Temporarily makes you immune to physical attacks.");
++	case SpellID::ItemRepair: return _("Repairs equipment, but may reduce its maximum durability.");
++	case SpellID::StaffRecharge: return _("Restores staff charges, but may reduce its maximum charges.");
++	case SpellID::TrapDisarm: return _("Attempts to disarm a trap.");
++	case SpellID::Elemental: return _("Sends a fiery elemental toward an enemy.");
++	case SpellID::ChargedBolt: return _("Releases several wandering sparks of lightning.");
++	case SpellID::HolyBolt: return _("Fires a holy bolt effective against undead.");
++	case SpellID::Resurrect: return _("Revives another player who has died.");
++	case SpellID::Telekinesis: return _("Interacts with a distant item, door or object.");
++	case SpellID::HealOther: return _("Restores another player's life.");
++	case SpellID::BloodStar: return _("Fires a magical star, consuming mana and some life.");
++	case SpellID::BoneSpirit: return _("Damages an enemy for a third of its current life.");
++	case SpellID::Mana: return _("Restores mana.");
++	case SpellID::Magi: return _("Fully restores mana.");
++	case SpellID::Jester: return _("Unleashes an unpredictable magical effect.");
++	case SpellID::LightningWall: return _("Creates a wall of crackling lightning.");
++	case SpellID::Immolation: return _("Releases fireballs in all directions.");
++	case SpellID::Warp: return _("Teleports you toward the nearest stairs.");
++	case SpellID::Reflect: return _("Reflects some melee damage back at attackers.");
++	case SpellID::Berserk: return _("Turns a monster against other monsters.");
++	case SpellID::RingOfFire: return _("Creates a ring of fire around you.");
++	case SpellID::Search: return _("Highlights nearby items on the ground.");
++	case SpellID::RuneOfFire: return _("Places a fire trap on the ground.");
++	case SpellID::RuneOfLight: return _("Places a lightning trap on the ground.");
++	case SpellID::RuneOfNova: return _("Places a trap that releases a lightning nova.");
++	case SpellID::RuneOfImmolation: return _("Places a trap that launches fireballs.");
++	case SpellID::RuneOfStone: return _("Places a trap that turns its victim to stone.");
++	default: return _("Select a spell or skill to see its description.");
++	}
++}
++
++std::string CtrSpellShortcutText(SpellID spell, SpellType type)
++{
++	constexpr const char *labels[] = { "(X)", "(Y)", "(L)", "(R)" };
++	const Player &player = *InspectPlayer;
++	std::string result;
++	for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
++		const SpellID assigned = slot == 0 ? player._pRSpell : player._pSplHotKey[slot];
++		const SpellType source = slot == 0 ? player._pRSplType : player._pSplTHotKey[slot];
++		if (assigned != spell || source != type)
++			continue;
++		if (!result.empty()) result += ' ';
++		result += labels[slot];
++	}
++	return result;
++}
++
++void DrawCtrBinding(const Surface &out)
++{
++	DrawCtrPanelBackground(out, CtrPanelBackground::SpellBinding);
++	DrawString(out, _("Choose a button to bind a skill or spell"), { { 16, CtrPanelTitleY }, { 368, 16 } },
++	    { .flags = UiFlags::ColorWhitegold | UiFlags::AlignCenter, .spacing = 0 });
++	DrawString(out, pgettext("spell", GetSpellData(bindingSpell).sNameText), { { 16, 48 }, { 368, 14 } },
++	    { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter, .spacing = 0 });
++	const int hoveredSlot = CtrSpellBindingHit(CtrScreenToTop(MousePosition));
++	constexpr const char *labels[] = { "(X)", "(Y)", "(L)", "(R)" };
++	for (size_t slot = 0; slot < CtrSpellShortcutCount; ++slot) {
++		const Point p = CtrSpellBindingPositions[slot];
++		FillRect(out, p.x, p.y, 37, 38, 0);
++		SpellID spell = InspectPlayer->_pSplHotKey[slot];
++		SpellType type = InspectPlayer->_pSplTHotKey[slot];
++		if (slot == 0) {
++			spell = InspectPlayer->_pRSpell;
++			type = InspectPlayer->_pRSplType;
++		}
++		if (IsValidSpell(spell)) {
++			SetSpellTrans(type);
++			DrawSmallSpellIcon(out, p + Displacement { 0, 37 }, spell);
++		}
++		if (static_cast<int>(slot) == hoveredSlot) {
++			DrawHalfTransparentRectTo(out, p.x, p.y, 37, 38, PAL16_RED + 7);
++			UnsafeDrawBorder2px(out, CtrSpellBindingRect(slot), PAL16_RED + 3);
++		}
++		DrawString(out, labels[slot], { { p.x - 14, p.y + 41 }, { 65, 16 } },
++		    { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter });
++	}
++	DrawString(out, _("(A) Assign    (B) Cancel"), { { 16, 201 }, { 368, 16 } }, { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter });
++}
++
++void DrawSpellBook3DS(const Surface &out)
++{
++	DrawCtrPanelBackground(out, CtrPanelBackground::Spells);
++	SpellbookTab = std::clamp(SpellbookTab, 0, CtrSpellbookPageCount() - 1);
++	if (bindingOpen) {
++		DrawCtrBinding(out);
++		return;
++	}
++	// Remove the artwork's original fixed page frames; draw only populated pages.
++	out.BlitFrom(out, MakeSdlRect(10, 180, 380, 23), { 10, CtrSpellTabsY - 3 });
++	DrawString(out, _("Spells & Skills"), { { 20, CtrPanelTitleY }, { 360, 14 } },
++	    { .flags = UiFlags::AlignCenter | UiFlags::ColorWhitegold });
++	DrawString(out, _("Press (A) to bind"), { { 20, 38 }, { 360, 14 } },
++	    { .flags = UiFlags::AlignCenter | UiFlags::ColorWhite, .spacing = 0 });
++	const Player &player = *InspectPlayer;
++	const uint64_t spells = player._pMemSpells | player._pISpells | player._pAblSpells;
++	constexpr int iconX = 22;
++	constexpr int nameX = 58;
++	const int nameWidth = 378 - nameX;
++	const int detailWidth = nameWidth / 2 - 2;
++	for (size_t entry = 0; entry < CtrSpellRowsPerPage; ++entry) {
++		const SpellID spell = GetSpellFromSpellPage(SpellbookTab, entry);
++		const int y = CtrSpellRowsY + entry * CtrSpellRowHeight;
++		if (!IsValidSpell(spell) || (spells & GetSpellBitmask(spell)) == 0)
++			continue;
++		const SpellType type = GetSBookTrans(spell, true);
++		const bool selected = spell == FocusedCtrSpell() && !IsInspectingPlayer();
++		if (selected)
++			DrawHalfTransparentRectTo(out, 20, y, 360, CtrSpellRowHeight, PAL16_RED + 7);
++		const Surface icon = SidePanelBuffer->subregion(0, 0, 40, 40);
++		FillRect(icon, 0, 0, 40, 40, 0);
++		SetSpellTrans(type);
++		DrawSmallSpellIcon(icon, { 0, 37 }, spell);
++		if (selected) {
++			SetSpellTrans(SpellType::Skill);
++			DrawSmallSpellIconBorder(icon, { 0, 37 });
++		}
++		out.ScaleBlitFrom(icon, MakeSdlRect(0, 0, 37, 38), MakeSdlRect(iconX, y + 3, 26, 27));
++		const SpellType infoType = CtrSpellSource(spell);
++		std::string name { pgettext("spell", GetSpellData(spell).sNameText) };
++		const std::string wrappedName = WordWrapString(name, nameWidth, GameFont12, 0);
++		const int detailsY = y + (wrappedName.find('\n') == std::string::npos ? 12 : 24);
++		DrawString(out, wrappedName, { { nameX, y }, { nameWidth, 24 } },
++		    { .flags = UiFlags::ColorWhite, .spacing = 0, .lineHeight = 12 });
++		if (infoType == SpellType::Skill) {
++			DrawString(out, _("Skill"), { { nameX, detailsY }, { nameWidth, 12 } }, { .flags = UiFlags::ColorWhitegold });
++		} else if (infoType == SpellType::Charges) {
++			const int charges = player.InvBody[INVLOC_HAND_LEFT]._iCharges;
++			DrawString(out, FormatRuntime(ngettext("Staff ({:d} charge)", "Staff ({:d} charges)", charges), charges), { { nameX, detailsY }, { nameWidth, 12 } }, { .flags = UiFlags::ColorWhitegold });
++		} else {
++			const int level = player.GetSpellLevel(spell);
++			DrawString(out, FormatRuntime(_("Lv {:d} · Mana: {:d}"), level, GetManaAmount(player, spell) >> 6), { { nameX, detailsY }, { detailWidth, 12 } }, { .flags = UiFlags::ColorWhitegold | UiFlags::KerningFitSpacing, .spacing = 0 });
++			const StringOrView power = GetSpellPowerText(spell, level);
++			DrawString(out, power, { { nameX + detailWidth + 4, detailsY }, { nameWidth - detailWidth - 4, 12 } }, { .flags = UiFlags::ColorWhitegold | UiFlags::AlignRight | UiFlags::KerningFitSpacing, .spacing = 0 });
++		}
++	}
++	const int pages = CtrSpellbookPageCount();
++	for (int page = 0; page < pages; ++page) {
++		const Rectangle button = CompactTabRect(page);
++		// Two 50% black blends leave roughly a quarter of the original stone
++		// visible through the tab, without painting over the supplied frame.
++		DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height);
++		DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height);
++		if (page == SpellbookTab)
++			DrawHalfTransparentRectTo(out, button.position.x, button.position.y, button.size.width, button.size.height, PAL16_RED + 10);
++		{
++			DrawHorizontalLine(out, button.position, button.size.width, PAL16_BEIGE + 10);
++			DrawVerticalLine(out, button.position, button.size.height, PAL16_BEIGE + 10);
++			DrawHorizontalLine(out, button.position + Displacement { 0, button.size.height - 1 }, button.size.width, PAL16_BEIGE + 3);
++			DrawVerticalLine(out, button.position + Displacement { button.size.width - 1, 0 }, button.size.height, PAL16_BEIGE + 3);
++		}
++		DrawString(out, std::to_string(page + 1), button, { .flags = UiFlags::AlignCenter | UiFlags::VerticalCenter | UiFlags::ColorWhite });
++	}
++}
++#endif
++
++} // namespace
++
++#ifdef __3DS__
++int CtrSpellbookPageCount()
++{
++	return std::max(1, static_cast<int>((KnownCtrSpells().size() + CtrSpellRowsPerPage - 1) / CtrSpellRowsPerPage));
++}
++
++int CtrSpellbookRowCount()
++{
++	const int count = static_cast<int>(KnownCtrSpells().size());
++	return std::clamp(count - SpellbookTab * CtrSpellRowsPerPage, 0, CtrSpellRowsPerPage);
++}
++
++bool CtrSpellBindingActive()
++{
++	return bindingOpen;
++}
++
++void MoveCtrSpellBinding(AxisDirection direction)
++{
++	const int current = CtrSpellBindingHit(CtrScreenToTop(MousePosition));
++	if (direction.x == AxisDirectionX_NONE && direction.y == AxisDirectionY_NONE)
++		return;
++	int next = current < 0 ? 0 : current;
++	if (current >= 0) {
++		const Point origin = CtrSpellBindingPositions[current];
++		int bestScore = 100000;
++		for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
++			const Point p = CtrSpellBindingPositions[slot];
++			const int dx = p.x - origin.x;
++			const int dy = p.y - origin.y;
++			if (direction.y != AxisDirectionY_NONE) {
++				if ((direction.y == AxisDirectionY_UP && dy >= 0)
++				    || (direction.y == AxisDirectionY_DOWN && dy <= 0))
++					continue;
++			} else if (dy != 0 || (direction.x == AxisDirectionX_LEFT && dx >= 0)
++			    || (direction.x == AxisDirectionX_RIGHT && dx <= 0)) {
++				continue;
++			}
++			const int score = dx * dx + dy * dy;
++			if (score < bestScore) {
++				bestScore = score;
++				next = slot;
++			}
++		}
++	}
++	SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(next).Center()));
++}
++
++int CtrSpellBindingSlot(ControllerButton button, bool modifierHeld)
++{
++	// Shoulder buttons are independent spell shortcuts, never modifiers.
++	(void)modifierHeld;
++	switch (button) {
++	case ControllerButton_BUTTON_X: return 0;
++	case ControllerButton_BUTTON_Y: return 1;
++	case ControllerButton_BUTTON_LEFTSHOULDER: return 2;
++	case ControllerButton_BUTTON_RIGHTSHOULDER: return 3;
++	default: return -1;
++	}
++}
++
++bool HandleCtrSpellBinding(ControllerButton button, bool modifierHeld)
++{
++	if (!SpellbookFlag || IsInspectingPlayer()) {
++		bindingOpen = false;
++		return false;
++	}
++	if (!bindingOpen) {
++		if (button == ControllerButton_BUTTON_Y) {
++			SpellbookTab = (SpellbookTab + 1) % CtrSpellbookPageCount();
++			return true;
++		}
++		if (button != ControllerButton_BUTTON_A)
++			return false;
++		bindingSpell = FocusedCtrSpell();
++		if (IsValidSpell(bindingSpell)) {
++			bindingType = CtrSpellSource(bindingSpell);
++			bindingOpen = true;
++			SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(0).Center()));
++		}
++		return true;
++	}
++	const int slot = button == ControllerButton_BUTTON_A
++	    ? CtrSpellBindingHit(CtrScreenToTop(MousePosition))
++	    : CtrSpellBindingSlot(button, modifierHeld);
++	if (slot >= 0) {
++		MyPlayer->_pSplHotKey[slot] = bindingSpell;
++		MyPlayer->_pSplTHotKey[slot] = bindingType;
++		if (slot == 0) {
++			MyPlayer->_pRSpell = bindingSpell;
++			MyPlayer->_pRSplType = bindingType;
++		}
++		// Existing per-character hotkey serialization persists these four slots.
++		bindingOpen = false;
++		RedrawEverything();
++	} else if (button == ControllerButton_BUTTON_B || button == ControllerButton_BUTTON_BACK) {
++		bindingOpen = false;
++	}
++	return true;
++}
++
++void DrawCtrHudSpellIcons(const Surface &out)
++{
++	static std::optional<OwnedSurface> icon;
++	if (!icon) icon.emplace(37, 38);
++	const Player &player = *MyPlayer;
++	for (int slot = 0; slot < CtrSpellShortcutCount; ++slot) {
++		const SpellID spell = slot == 0 ? player._pRSpell : player._pSplHotKey[slot];
++		SpellType type = slot == 0 ? player._pRSplType : player._pSplTHotKey[slot];
++		if (!IsValidSpell(spell)) continue;
++		const uint64_t owned = type == SpellType::Skill ? player._pAblSpells
++		    : type == SpellType::Spell ? player._pMemSpells
++		    : type == SpellType::Charges ? player._pISpells
++		    : type == SpellType::Scroll ? player._pScrlSpells : 0;
++		if ((owned & GetSpellBitmask(spell)) == 0
++		    || (type == SpellType::Spell && CheckSpell(player, spell, type, true) != SpellCheckResult::Success)
++		    || (leveltype == DTYPE_TOWN && !GetSpellData(spell).isAllowedInTown()))
++			type = SpellType::Invalid;
++		FillRect(*icon, 0, 0, 37, 38, 0);
++		SetSpellTrans(type);
++		DrawSmallSpellIcon(*icon, { 0, 37 }, spell);
++		const Rectangle target = CtrHudSpellSlot(slot);
++		const Size size = CtrEnlargeImage({ 37, 38 }, target.size);
++		out.ScaleBlitFrom(*icon, MakeSdlRect(0, 0, 37, 38),
++		    MakeSdlRect(target.position.x + (target.size.width - size.width) / 2,
++		        target.position.y, size.width, size.height));
++	}
++}
++
++void DrawCtrSpellDescription(const Surface &out)
++{
++	const Rectangle box = CtrBottomInfoBox;
++	FillRect(out, box.position.x, box.position.y, box.size.width, box.size.height, 0);
++	const SpellID spell = bindingOpen ? bindingSpell : FocusedCtrSpell();
++	const std::string text = WordWrapString(SpellDescription(spell), box.size.width - 12, GameFont12, 0);
++	DrawString(out, text, box.inset({ 6, 6 }), { .flags = UiFlags::ColorWhite | UiFlags::AlignCenter | UiFlags::VerticalCenter, .spacing = 0 });
++}
++#endif
++
++std::expected<void, std::string> InitSpellBook()
++{
++	ASSIGN_OR_RETURN(spellBookBackground, LoadCelWithStatus("data\\spellbk", static_cast<uint16_t>(SidePanelSize.width)));
++	ASSIGN_OR_RETURN(spellBookButtons, LoadCelWithStatus("data\\spellbkb", SpellBookButtonWidth()));
++	return LoadSmallSpellIcons();
++}
++
++void FreeSpellBook()
++{
++#ifdef __3DS__
++	bindingOpen = false;
++#endif
++	FreeSmallSpellIcons();
++	spellBookButtons = std::nullopt;
++	spellBookBackground = std::nullopt;
++}
++
++void DrawSpellBook(const Surface &out)
++{
++#ifdef __3DS__
++	DrawSpellBook3DS(out);
++	return;
++#endif
++	constexpr int SpellBookButtonX = 7;
++	constexpr int SpellBookButtonY = 348;
++	ClxDraw(out, GetPanelPosition(UiPanels::Spell, { 0, 351 }), (*spellBookBackground)[0]);
++	const int buttonX = gbIsHellfire && SpellbookTab < 5
++	    ? SpellBookButtonWidthHellfire * SpellbookTab
++	    : (SpellBookButtonWidthDiablo * SpellbookTab)
++	        // BUGFIX: rendering of page 3 and page 4 buttons are both off-by-one pixel (fixed).
++	        + (SpellbookTab == 2 || SpellbookTab == 3 ? 1 : 0);
++
++	ClxDraw(out, GetPanelPosition(UiPanels::Spell, { SpellBookButtonX + buttonX, SpellBookButtonY }), (*spellBookButtons)[SpellbookTab]);
++	const Player &player = *InspectPlayer;
++	const uint64_t spl = player._pMemSpells | player._pISpells | player._pAblSpells;
++
++	const int lineHeight = 18;
++
++	int yp = 12;
++	const int textPaddingTop = 7;
++	for (size_t pageEntry = 0; pageEntry < SpellBookPageEntries; pageEntry++) {
++		const SpellID sn = GetSpellFromSpellPage(SpellbookTab, pageEntry);
++		if (IsValidSpell(sn) && (spl & GetSpellBitmask(sn)) != 0) {
++			const SpellType st = GetSBookTrans(sn, true);
++			SetSpellTrans(st);
++			const Point spellCellPosition = GetPanelPosition(UiPanels::Spell, { 11, yp + SpellBookDescription.height });
++			DrawSmallSpellIcon(out, spellCellPosition, sn);
++			if (sn == player._pRSpell && st == player._pRSplType && !IsInspectingPlayer()) {
++				SetSpellTrans(SpellType::Skill);
++				DrawSmallSpellIconBorder(out, spellCellPosition);
++			}
++
++			const Point line0 { 0, yp + textPaddingTop };
++			const Point line1 { 0, yp + textPaddingTop + lineHeight };
++			PrintSBookStr(out, line0, pgettext("spell", GetSpellData(sn).sNameText));
++			switch (GetSBookTrans(sn, false)) {
++			case SpellType::Skill:
++				PrintSBookStr(out, line1, _("Skill"));
++				break;
++			case SpellType::Charges: {
++				const int charges = player.InvBody[INVLOC_HAND_LEFT]._iCharges;
++				PrintSBookStr(out, line1, FormatRuntime(ngettext("Staff ({:d} charge)", "Staff ({:d} charges)", charges), charges));
++			} break;
++			default: {
++				const int mana = GetManaAmount(player, sn) >> 6;
++				const int lvl = player.GetSpellLevel(sn);
++				PrintSBookStr(out, line0, FormatRuntime(pgettext(/* TRANSLATORS: UI constraints, keep short please.*/ "spellbook", "Level {:d}"), lvl), UiFlags::AlignRight);
++				if (const StringOrView text = GetSpellPowerText(sn, lvl); !text.empty()) {
++					PrintSBookStr(out, line1, text, UiFlags::AlignRight);
++				}
++				PrintSBookStr(out, line1, FormatRuntime(pgettext(/* TRANSLATORS: UI constraints, keep short please.*/ "spellbook", "Mana: {:d}"), mana));
++			} break;
++			}
++		}
++		yp += SpellBookDescription.height;
++	}
++}
++
++void CheckSBook()
++{
++#ifdef __3DS__
++	Point mousePos = CtrScreenToTop(MousePosition);
++#else
++	Point mousePos = MousePosition;
++#endif
++
++	// Icons are drawn in a column near the left side of the panel and aligned with the spell book description entries
++	// Spell icons/buttons are 37x38 pixels, laid out from 11,18 with a 5 pixel margin between each icon. This is close
++	// enough to the height of the space given to spell descriptions that we can reuse that value and subtract the
++	// padding from the end of the area.
++#ifdef __3DS__
++	if (bindingOpen)
++		return;
++	const Rectangle iconArea { { 20, CtrSpellRowsY }, { 360, CtrSpellRowHeight * CtrSpellRowsPerPage } };
++	constexpr int rowHeight = CtrSpellRowHeight;
++#else
++	const Rectangle iconArea = { GetPanelPosition(UiPanels::Spell, { 11, 18 }), Size { 37, (SpellBookDescription.height * 7) - 5 } };
++	constexpr int rowHeight = SpellBookDescription.height;
++#endif
++	if (iconArea.contains(mousePos) && !IsInspectingPlayer()) {
++		const SpellID sn = GetSpellFromSpellPage(SpellbookTab, (mousePos.y - iconArea.position.y) / rowHeight);
++		Player &player = *InspectPlayer;
++		const uint64_t spl = player._pMemSpells | player._pISpells | player._pAblSpells;
++		if (IsValidSpell(sn) && (spl & GetSpellBitmask(sn)) != 0) {
++			SpellType st = SpellType::Spell;
++			if ((player._pISpells & GetSpellBitmask(sn)) != 0) {
++				st = SpellType::Charges;
++			}
++			if ((player._pAblSpells & GetSpellBitmask(sn)) != 0) {
++				st = SpellType::Skill;
++			}
++#ifdef __3DS__
++			bindingSpell = sn;
++			bindingType = st;
++			bindingOpen = true;
++			SetCursorPos(CtrTopToScreen(CtrSpellBindingRect(0).Center()));
++#else
++			player._pRSpell = sn;
++			player._pRSplType = st;
++#endif
++			RedrawEverything();
++		}
++		return;
++	}
++
++	// The width of the panel excluding the border is 305 pixels. This does not cleanly divide by 4 meaning Diablo tabs
++	// end up with an extra pixel somewhere around the buttons. Vanilla Diablo had the buttons left-aligned, devilutionX
++	// instead justifies the buttons and puts the gap between buttons 2/3. See DrawSpellBook
++#ifdef __3DS__
++	for (int page = 0; page < CtrSpellbookPageCount(); ++page) {
++		if (CompactTabRect(page).contains(mousePos)) {
++			SpellbookTab = page;
++			break;
++		}
++	}
++	return;
++#else
++	const int buttonWidth = SpellBookButtonWidth();
++	// Tabs are drawn in a row near the bottom of the panel
++	const Rectangle tabArea = { GetPanelPosition(UiPanels::Spell, { 7, 320 }), Size { 305, 29 } };
++	if (tabArea.contains(mousePos)) {
++		int hitColumn = mousePos.x - tabArea.position.x;
++		// Clicking on the gutter currently activates tab 3. Could make it do nothing by checking for == here and return early.
++		if (!gbIsHellfire && hitColumn > buttonWidth * 2) {
++			// Subtract 1 pixel to account for the gutter between buttons 2/3
++			hitColumn--;
++		}
++		SpellbookTab = hitColumn / buttonWidth;
++	}
++#endif
++}
++
++} // namespace devilution
+diff --git a/Source/player.cpp b/Source/player.cpp
+index 8e3d72f..7e9730c 100644
+--- a/Source/player.cpp
++++ b/Source/player.cpp
+@@ -2570,7 +2570,7 @@ void InitPlayer(Player &player, bool firstTime)
+ 		ActivateVision(player.position.tile, player._pLightRad, player.getId());
+ 	}
+ 
+-	player._pAblSpells = GetSpellBitmask(GetPlayerStartingLoadoutForClass(player._pClass).skill);
++	player._pAblSpells = GetSpellBitmask(GetPlayerStartingLoadoutForClass(player._pClass).skill) | GetSpellBitmask(SpellID::ItemRepair);
+ 
+ 	player._pInvincible = false;
+ 
+diff --git a/Source/qol/visual_store.h b/Source/qol/visual_store.h
+index 56a0fb8..31a98ba 100644
+--- a/Source/qol/visual_store.h
++++ b/Source/qol/visual_store.h
+@@ -189,6 +189,7 @@ int GetRepairCost(const Item &item);
+  * @brief Repair a specific item from the player's inventory/body.
+  * @param invIndex The inventory index of the item.
+  */
++void VisualStoreRepairAll();
+ void VisualStoreRepairItem(int invIndex);
+ 
+ } // namespace devilution

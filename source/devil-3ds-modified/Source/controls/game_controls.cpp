@@ -1,0 +1,1081 @@
+#include "controls/game_controls.h"
+
+#include <cstdint>
+#ifdef __3DS__
+#include <algorithm>
+#include "platform/ctr/belt_gesture.hpp"
+#include "platform/ctr/ui_geometry.hpp"
+#include "msg.h"
+#include "engine/backbuffer_state.hpp"
+#include "utils/sdl_compat.h"
+#endif
+
+#ifdef USE_SDL3
+#include <SDL3/SDL_events.h>
+#else
+#include <SDL.h>
+#endif
+
+#include "controls/control_mode.hpp"
+#include "controls/controller.h"
+#include "controls/controller_motion.h"
+#ifndef USE_SDL1
+#include "controls/devices/game_controller.h"
+#endif
+#include "controls/devices/joystick.h"
+#include "controls/padmapper.hpp"
+#include "controls/plrctrls.h"
+#include "controls/touch/gamepad.h"
+#include "control/control.hpp"
+#include "cursor.h"
+#include "diablo.h"
+#include "doom.h"
+#include "effects.h"
+#include "game_mode.hpp"
+#include "gamemenu.h"
+#include "gmenu.h"
+#include "inv.h"
+#include "minitext.h"
+#include "options.h"
+#include "panels/charpanel.hpp"
+#include "panels/quest_log.hpp"
+#include "panels/spell_book.hpp"
+#include "panels/spell_list.hpp"
+#include "qol/stash.h"
+#include "qol/visual_store.h"
+#include "stores.h"
+#include "utils/is_of.hpp"
+
+namespace devilution {
+
+bool PadMenuNavigatorActive = false;
+bool PadHotspellMenuActive = false;
+ControllerButton SuppressedButton = ControllerButton_NONE;
+
+namespace {
+
+SDL_Keycode TranslateControllerButtonToGameMenuKey(ControllerButton controllerButton)
+{
+	switch (TranslateTo(GamepadType, controllerButton)) {
+	case ControllerButton_BUTTON_A:
+	case ControllerButton_BUTTON_Y:
+		return SDLK_RETURN;
+	case ControllerButton_BUTTON_B:
+	case ControllerButton_BUTTON_BACK:
+	case ControllerButton_BUTTON_START:
+		return SDLK_ESCAPE;
+	case ControllerButton_BUTTON_LEFTSTICK:
+		return SDLK_TAB; // Map
+	default:
+		return SDLK_UNKNOWN;
+	}
+}
+
+SDL_Keycode TranslateControllerButtonToMenuKey(ControllerButton controllerButton)
+{
+	switch (TranslateTo(GamepadType, controllerButton)) {
+	case ControllerButton_BUTTON_A:
+		return SDLK_SPACE;
+	case ControllerButton_BUTTON_B:
+	case ControllerButton_BUTTON_BACK:
+	case ControllerButton_BUTTON_START:
+		return SDLK_ESCAPE;
+	case ControllerButton_BUTTON_Y:
+		return SDLK_RETURN;
+	case ControllerButton_BUTTON_LEFTSTICK:
+		return SDLK_TAB; // Map
+	case ControllerButton_BUTTON_DPAD_LEFT:
+		return SDLK_LEFT;
+	case ControllerButton_BUTTON_DPAD_RIGHT:
+		return SDLK_RIGHT;
+	case ControllerButton_BUTTON_DPAD_UP:
+		return SDLK_UP;
+	case ControllerButton_BUTTON_DPAD_DOWN:
+		return SDLK_DOWN;
+	default:
+		return SDLK_UNKNOWN;
+	}
+}
+
+SDL_Keycode TranslateControllerButtonToQuestLogKey(ControllerButton controllerButton)
+{
+	switch (TranslateTo(GamepadType, controllerButton)) {
+	case ControllerButton_BUTTON_A:
+	case ControllerButton_BUTTON_Y:
+		return SDLK_RETURN;
+	case ControllerButton_BUTTON_B:
+		return SDLK_SPACE;
+	case ControllerButton_BUTTON_LEFTSTICK:
+		return SDLK_TAB; // Map
+	default:
+		return SDLK_UNKNOWN;
+	}
+}
+
+bool GetGameAction(const SDL_Event &event, ControllerButtonEvent ctrlEvent, GameAction *action)
+{
+	const bool inGameMenu = InGameMenu();
+
+#ifndef USE_SDL1
+	if (ControlMode == ControlTypes::VirtualGamepad) {
+		switch (event.type) {
+#ifdef USE_SDL3
+		case SDL_EVENT_FINGER_DOWN:
+#else
+		case SDL_FINGERDOWN:
+#endif
+			if (VirtualGamepadState.menuPanel.charButton.isHeld && VirtualGamepadState.menuPanel.charButton.didStateChange) {
+				*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
+				return true;
+			}
+			if (VirtualGamepadState.menuPanel.questsButton.isHeld && VirtualGamepadState.menuPanel.questsButton.didStateChange) {
+				*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
+				return true;
+			}
+			if (VirtualGamepadState.menuPanel.inventoryButton.isHeld && VirtualGamepadState.menuPanel.inventoryButton.didStateChange) {
+				*action = GameAction(GameActionType_TOGGLE_INVENTORY);
+				return true;
+			}
+			if (VirtualGamepadState.menuPanel.mapButton.isHeld && VirtualGamepadState.menuPanel.mapButton.didStateChange) {
+				*action = GameActionSendKey { SDLK_TAB, false };
+				return true;
+			}
+			if (VirtualGamepadState.primaryActionButton.isHeld && VirtualGamepadState.primaryActionButton.didStateChange) {
+				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+					*action = GameAction(GameActionType_PRIMARY_ACTION);
+					if (ControllerActionHeld == GameActionType_NONE) {
+						ControllerActionHeld = GameActionType_PRIMARY_ACTION;
+					}
+				} else if (sgpCurrentMenu != nullptr || IsPlayerInStore() || QuestLogIsOpen) {
+					*action = GameActionSendKey { SDLK_RETURN, false };
+				} else {
+					*action = GameActionSendKey { SDLK_SPACE, false };
+				}
+				return true;
+			}
+			if (VirtualGamepadState.secondaryActionButton.isHeld && VirtualGamepadState.secondaryActionButton.didStateChange) {
+				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+					*action = GameAction(GameActionType_SECONDARY_ACTION);
+					if (ControllerActionHeld == GameActionType_NONE)
+						ControllerActionHeld = GameActionType_SECONDARY_ACTION;
+				}
+				return true;
+			}
+			if (VirtualGamepadState.spellActionButton.isHeld && VirtualGamepadState.spellActionButton.didStateChange) {
+				if (!inGameMenu && !QuestLogIsOpen && !SpellbookFlag) {
+					*action = GameAction(GameActionType_CAST_SPELL);
+					if (ControllerActionHeld == GameActionType_NONE)
+						ControllerActionHeld = GameActionType_CAST_SPELL;
+				}
+				return true;
+			}
+			if (VirtualGamepadState.cancelButton.isHeld && VirtualGamepadState.cancelButton.didStateChange) {
+				if (inGameMenu || DoomFlag || SpellSelectFlag)
+					*action = GameActionSendKey { SDLK_ESCAPE, false };
+				else if (invflag)
+					*action = GameAction(GameActionType_TOGGLE_INVENTORY);
+				else if (SpellbookFlag)
+					*action = GameAction(GameActionType_TOGGLE_SPELL_BOOK);
+				else if (QuestLogIsOpen)
+					*action = GameAction(GameActionType_TOGGLE_QUEST_LOG);
+				else if (CharFlag)
+					*action = GameAction(GameActionType_TOGGLE_CHARACTER_INFO);
+				return true;
+			}
+			if (VirtualGamepadState.healthButton.isHeld && VirtualGamepadState.healthButton.didStateChange) {
+				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
+					*action = GameAction(GameActionType_USE_HEALTH_POTION);
+				return true;
+			}
+			if (VirtualGamepadState.manaButton.isHeld && VirtualGamepadState.manaButton.didStateChange) {
+				if (!QuestLogIsOpen && !SpellbookFlag && !IsPlayerInStore())
+					*action = GameAction(GameActionType_USE_MANA_POTION);
+				return true;
+			}
+			break;
+#ifdef USE_SDL3
+		case SDL_EVENT_FINGER_UP:
+#else
+		case SDL_FINGERUP:
+#endif
+			if ((!VirtualGamepadState.primaryActionButton.isHeld && ControllerActionHeld == GameActionType_PRIMARY_ACTION)
+			    || (!VirtualGamepadState.secondaryActionButton.isHeld && ControllerActionHeld == GameActionType_SECONDARY_ACTION)
+			    || (!VirtualGamepadState.spellActionButton.isHeld && ControllerActionHeld == GameActionType_CAST_SPELL)) {
+				// Handle button release for visual store buttons
+				if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
+					PerformPrimaryActionRelease();
+				}
+				ControllerActionHeld = GameActionType_NONE;
+				LastPlayerAction = PlayerActionType::None;
+			}
+			break;
+		}
+	}
+#endif
+
+	if (PadMenuNavigatorActive || PadHotspellMenuActive)
+		return false;
+
+	SDL_Keycode translation = SDLK_UNKNOWN;
+
+	if (gmenu_is_active() || IsPlayerInStore())
+		translation = TranslateControllerButtonToGameMenuKey(ctrlEvent.button);
+	else if (inGameMenu)
+		translation = TranslateControllerButtonToMenuKey(ctrlEvent.button);
+	else if (QuestLogIsOpen)
+		translation = TranslateControllerButtonToQuestLogKey(ctrlEvent.button);
+
+	if (translation != SDLK_UNKNOWN) {
+		*action = GameActionSendKey { static_cast<uint32_t>(translation), ctrlEvent.up };
+		return true;
+	}
+
+	return false;
+}
+
+bool CanDeferToMovementHandler(const PadmapperOptions::Action &action)
+{
+	if (action.boundInput.modifier != ControllerButton_NONE)
+		return false;
+
+	if (SpellSelectFlag) {
+		const std::string_view prefix { "QuickSpell" };
+		const std::string_view key { action.key };
+		if (key.size() >= prefix.size()) {
+			const std::string_view truncated { key.data(), prefix.size() };
+			if (truncated == prefix)
+				return false;
+		}
+	}
+
+	return IsAnyOf(action.boundInput.button,
+	    ControllerButton_BUTTON_DPAD_UP,
+	    ControllerButton_BUTTON_DPAD_DOWN,
+	    ControllerButton_BUTTON_DPAD_LEFT,
+	    ControllerButton_BUTTON_DPAD_RIGHT);
+}
+
+#ifdef __3DS__
+uint32_t CtrConsumedSpellButtons = 0;
+
+struct StashItemButtonState {
+	bool active = false;
+	bool finished = true;
+	bool toStash = false;
+	uint32_t pressedAt = 0;
+	Player *player = nullptr;
+	uint32_t seed = 0;
+	uint16_t createInfo = 0;
+	_item_indexes itemIndex = IDI_NONE;
+} StashItemButton;
+
+bool CanFinishStashItemAction()
+{
+	return IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag
+	    && MyPlayer == StashItemButton.player && !MyPlayer->hasNoLife()
+	    && !MyPlayer->HoldItem.isEmpty()
+	    && MyPlayer->HoldItem.keyAttributesMatch(StashItemButton.seed, StashItemButton.itemIndex, StashItemButton.createInfo);
+}
+
+void BeginStashItemAction()
+{
+	if (StashItemButton.active)
+		return;
+	StashItemButton.active = true;
+	StashItemButton.finished = true;
+	const bool toStash = !GetLeftPanel().contains(MousePosition);
+	if (MyPlayer->HoldItem.isEmpty()) {
+		if (pcursinvitem == -1 && pcursstashitem == StashStruct::EmptyCell)
+			return;
+		PerformPrimaryAction();
+	}
+	const Item &item = MyPlayer->HoldItem;
+	if (item.isEmpty())
+		return;
+	StashItemButton.finished = false;
+	StashItemButton.toStash = toStash;
+	StashItemButton.pressedAt = SDL_GetTicks();
+	StashItemButton.player = MyPlayer;
+	StashItemButton.seed = item._iSeed;
+	StashItemButton.createInfo = item._iCreateInfo;
+	StashItemButton.itemIndex = item.IDidx;
+}
+
+void FinishStashItemAction()
+{
+	Update3DSStashItemAction();
+	if (!StashItemButton.finished && CanFinishStashItemAction())
+		TryDropItem();
+	StashItemButton.active = false;
+	StashItemButton.finished = true;
+}
+
+struct ButtonAHoldState {
+	bool active = false;
+	bool triggered = false;
+	uint32_t pressedAt = 0;
+	int invItem = -1;
+	uint16_t stashItem = StashStruct::EmptyCell;
+	Point pressPos = { 0, 0 };
+} ButtonAHold;
+
+
+void DrinkPotion3DS(int firstSlot, int lastSlot)
+{
+	Player &player = *MyPlayer;
+	for (int i = firstSlot; i < lastSlot; i++) {
+		const Item &item = player.SpdList[i];
+		if (item.isEmpty())
+			continue;
+
+		const bool isRejuvenation = IsAnyOf(item._iMiscId, IMISC_REJUV, IMISC_FULLREJUV) || (item._iMiscId == IMISC_ARENAPOT && player.isOnArenaLevel());
+		const bool isHealing = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_HEAL, IMISC_FULLHEAL) || item.isScrollOf(SpellID::Healing);
+		const bool isMana = isRejuvenation || IsAnyOf(item._iMiscId, IMISC_MANA, IMISC_FULLMANA);
+
+		if (isHealing || isMana) {
+			UseInvItem(INVITEM_BELT_FIRST + i);
+			return;
+		}
+	}
+}
+
+void SwitchUiTab(bool forward)
+{
+	// Tab order follows the 3DS menu carousel: quests, character, inventory, spells.
+	int current = -1;
+	if (QuestLogIsOpen)
+		current = 0;
+	else if (CharFlag)
+		current = 1;
+	else if (invflag)
+		current = 2;
+	else if (SpellbookFlag)
+		current = 3;
+
+	if (current == -1)
+		current = 2;
+
+	const int next = forward ? ((current + 1) % 4) : ((current + 3) % 4);
+
+	if (CharFlag)
+		CloseCharPanel();
+	if (invflag)
+		CloseInventory();
+	if (QuestLogIsOpen)
+		QuestLogIsOpen = false;
+	if (SpellbookFlag)
+		SpellbookFlag = false;
+	if (SpellSelectFlag)
+		SpellSelectFlag = false;
+
+	Cancel3DSButtonAHold();
+
+	switch (next) {
+	case 0:
+		StartQuestlog();
+		break;
+	case 1:
+		OpenCharPanel();
+		if (CharFlag) {
+			if (pcurs == CURSOR_DISARM)
+				NewCursor(CURSOR_HAND);
+			FocusOnCharInfo();
+		}
+		break;
+	case 2:
+		invflag = true;
+		if (pcurs == CURSOR_DISARM)
+			NewCursor(CURSOR_HAND);
+		FocusOnInventory();
+		break;
+	case 3:
+		SpellbookFlag = true;
+		break;
+	}
+}
+
+void ReleaseControllerButton(ControllerButton button)
+{
+	if (button == ControllerButton_BUTTON_A)
+		button = ControllerButton_BUTTON_B;
+	else if (button == ControllerButton_BUTTON_B)
+		button = ControllerButton_BUTTON_A;
+
+	const uint32_t buttonMask = uint32_t { 1 } << static_cast<unsigned>(button);
+	if ((CtrConsumedSpellButtons & buttonMask) != 0) {
+		CtrConsumedSpellButtons &= ~buttonMask;
+		return;
+	}
+
+	if (button == ControllerButton_BUTTON_A) {
+		if (ButtonAHold.active) {
+			const bool wasTriggered = ButtonAHold.triggered;
+			Cancel3DSButtonAHold();
+			if (!wasTriggered) {
+				PerformPrimaryAction();
+			}
+		}
+		if (ControllerActionHeld == GameActionType_PRIMARY_ACTION) {
+			ControllerActionHeld = GameActionType_NONE;
+			LastPlayerAction = PlayerActionType::None;
+		}
+		PerformPrimaryActionRelease();
+	} else if (button == ControllerButton_BUTTON_X) {
+		if (ControllerActionHeld == GameActionType_CAST_SPELL) {
+			ControllerActionHeld = GameActionType_NONE;
+			LastPlayerAction = PlayerActionType::None;
+		}
+	}
+}
+#endif
+
+void PressControllerButton(ControllerButton button)
+{
+	if (IsStashOpen) {
+		switch (button) {
+		case ControllerButton_BUTTON_BACK:
+			StartGoldWithdraw();
+			return;
+		case ControllerButton_BUTTON_LEFTSHOULDER:
+			Stash.PreviousPage();
+			return;
+		case ControllerButton_BUTTON_RIGHTSHOULDER:
+			Stash.NextPage();
+			return;
+		default:
+			break;
+		}
+	}
+
+	if (PadHotspellMenuActive) {
+		auto quickSpellAction = [](size_t slot) {
+			if (SpellSelectFlag) {
+				SetSpeedSpell(slot);
+				return;
+			}
+			if (!*GetOptions().Gameplay.quickCast)
+				ToggleSpell(slot);
+			else
+				QuickCast(slot);
+		};
+		switch (button) {
+		case devilution::ControllerButton_BUTTON_A:
+			quickSpellAction(2);
+			return;
+		case devilution::ControllerButton_BUTTON_B:
+			quickSpellAction(3);
+			return;
+		case devilution::ControllerButton_BUTTON_X:
+			quickSpellAction(0);
+			return;
+		case devilution::ControllerButton_BUTTON_Y:
+			quickSpellAction(1);
+			return;
+		default:
+			break;
+		}
+	}
+
+	if (PadMenuNavigatorActive) {
+		switch (button) {
+		case devilution::ControllerButton_BUTTON_DPAD_UP:
+			PressEscKey();
+			LastPlayerAction = PlayerActionType::None;
+			PadHotspellMenuActive = false;
+			PadMenuNavigatorActive = false;
+			gamemenu_on();
+			return;
+		case devilution::ControllerButton_BUTTON_DPAD_DOWN:
+			CycleAutomapType();
+			return;
+		case devilution::ControllerButton_BUTTON_DPAD_LEFT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+			return;
+		case devilution::ControllerButton_BUTTON_DPAD_RIGHT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+			return;
+		case devilution::ControllerButton_BUTTON_A:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+			return;
+		case devilution::ControllerButton_BUTTON_B:
+			return;
+		case devilution::ControllerButton_BUTTON_X:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_QUEST_LOG });
+			return;
+		case devilution::ControllerButton_BUTTON_Y:
+#ifdef __3DS__
+			GetOptions().Graphics.zoom.SetValue(!*GetOptions().Graphics.zoom);
+			CalcViewportGeometry();
+#endif
+			return;
+		default:
+			break;
+		}
+	}
+
+#ifdef __3DS__
+	if (button == ControllerButton_BUTTON_A)
+		button = ControllerButton_BUTTON_B;
+	else if (button == ControllerButton_BUTTON_B)
+		button = ControllerButton_BUTTON_A;
+
+	if (button != ControllerButton_BUTTON_A)
+		Cancel3DSButtonAHold();
+
+	if (MyPlayerIsDead) {
+		if (button == ControllerButton_BUTTON_A || button == ControllerButton_BUTTON_B || button == ControllerButton_BUTTON_START) {
+			if (!gbIsMultiplayer) {
+				gamemenu_exit_game(false);
+			} else {
+				NetSendCmd(true, CMD_RETOWN);
+			}
+			return;
+		}
+	}
+
+	if (Is3DSVisualStoreSalePending()) {
+		if (button == ControllerButton_BUTTON_A) Confirm3DSVisualStoreSale(true);
+		else if (button == ControllerButton_BUTTON_B) Confirm3DSVisualStoreSale(false);
+		return;
+	}
+
+	const bool modifierHeld = IsControllerButtonPressed(ControllerButton_BUTTON_LEFTSHOULDER);
+	if (HandleCtrSpellBinding(button, modifierHeld)) {
+		CtrConsumedSpellButtons |= uint32_t { 1 } << static_cast<unsigned>(button);
+		return;
+	}
+
+	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
+	if (uiOpen) {
+		switch (button) {
+		case ControllerButton_BUTTON_DPAD_UP:
+			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+				CloseCharPanel();
+				QuestLogIsOpen = false;
+				SpellbookFlag = false;
+				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+			}
+			return;
+		case ControllerButton_BUTTON_DPAD_LEFT:
+			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+				if (QuestLogIsOpen) {
+					QuestLogIsOpen = false;
+				} else {
+					CloseCharPanel();
+				StartQuestlog();
+				}
+			}
+			return;
+		case ControllerButton_BUTTON_DPAD_RIGHT:
+			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+				if (SpellbookFlag) {
+					SpellbookFlag = false;
+				} else {
+					CloseCharPanel();
+					CloseInventory();
+					QuestLogIsOpen = false;
+					SpellbookFlag = true;
+				}
+			}
+			return;
+		case ControllerButton_BUTTON_DPAD_DOWN:
+			if (!IsStashOpen && !IsPlayerInStore() && !qtextflag && !SpellSelectFlag) {
+				CloseCharPanel();
+				CloseInventory();
+				QuestLogIsOpen = false;
+				SpellbookFlag = false;
+				DoAutoMap();
+			}
+			return;
+
+		case ControllerButton_BUTTON_A:
+			if (IsPlayerInStore()) {
+				StoreEnter();
+			} else if (qtextflag) {
+				PressEscKey();
+			} else {
+				const bool hoveringItem = pcurs == CURSOR_HAND
+				    && ((invflag && pcursinvitem != -1)
+				        || (IsStashOpen && pcursstashitem != StashStruct::EmptyCell));
+				if (MyPlayer->HoldItem.isEmpty() && hoveringItem) {
+					ButtonAHold.active = true;
+					ButtonAHold.triggered = false;
+					ButtonAHold.pressedAt = SDL_GetTicks();
+					ButtonAHold.invItem = pcursinvitem;
+					ButtonAHold.stashItem = pcursstashitem;
+					ButtonAHold.pressPos = MousePosition;
+				} else {
+					Cancel3DSButtonAHold();
+					PerformPrimaryAction();
+				}
+			}
+			return;
+
+		case ControllerButton_BUTTON_B:
+			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
+				NewCursor(CURSOR_HAND);
+				return;
+			}
+			PressEscKey();
+			return;
+
+		case ControllerButton_BUTTON_X:
+			if (invflag)
+				PerformPrimaryAction();
+			return;
+
+		case ControllerButton_BUTTON_Y:
+			if (IsVisualStoreOpen) {
+				PerformSecondaryAction();
+			} else if (IsStashOpen) {
+				PerformSecondaryAction();
+			} else if (invflag) {
+				if (MyPlayer->HoldItem.isEmpty())
+					PerformPrimaryAction();
+				if (!MyPlayer->HoldItem.isEmpty())
+					TryDropItem();
+			} else {
+				PerformSecondaryAction();
+			}
+			return;
+
+		case ControllerButton_BUTTON_LEFTSHOULDER:
+			if (IsVisualStoreOpen) {
+				VisualStorePreviousPage();
+				RedrawEverything();
+			} else if (IsStashOpen) {
+				Stash.PreviousPage();
+			} else {
+				SwitchUiTab(false);
+			}
+			return;
+
+		case ControllerButton_BUTTON_RIGHTSHOULDER:
+			if (IsVisualStoreOpen) {
+				VisualStoreNextPage();
+				RedrawEverything();
+			} else if (IsStashOpen) {
+				Stash.NextPage();
+			} else {
+				SwitchUiTab(true);
+			}
+			return;
+
+		case ControllerButton_BUTTON_BACK:
+			if (IsStashOpen) {
+				StartGoldWithdraw();
+			} else if (IsVisualStoreOpen) {
+				VisualStoreRepairAll();
+			} else {
+				CloseCharPanel();
+				QuestLogIsOpen = false;
+				SpellbookFlag = false;
+				ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+			}
+			return;
+
+		case ControllerButton_BUTTON_START:
+			gamemenu_on();
+			return;
+
+		case ControllerButton_AXIS_TRIGGERLEFT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+			return;
+
+		case ControllerButton_AXIS_TRIGGERRIGHT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+			return;
+
+		default:
+			break;
+		}
+	} else if (!InGameMenu()) {
+		switch (button) {
+		case ControllerButton_BUTTON_A:
+			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) {
+				TryIconCurs();
+				return;
+			}
+			ControllerActionHeld = GameActionType_PRIMARY_ACTION;
+			LastPlayerAction = PlayerActionType::None;
+			if (pcursitem != -1) {
+				PerformSecondaryAction();
+			} else {
+				PerformPrimaryAction();
+			}
+			return;
+
+		case ControllerButton_BUTTON_B:
+			if (pcurs > CURSOR_HAND && pcurs < CURSOR_FIRSTITEM) NewCursor(CURSOR_HAND);
+			else PressEscKey();
+			return;
+
+		case ControllerButton_BUTTON_X:
+		case ControllerButton_BUTTON_Y:
+		case ControllerButton_BUTTON_LEFTSHOULDER:
+		case ControllerButton_BUTTON_RIGHTSHOULDER: {
+			const int slot = CtrSpellBindingSlot(button, false);
+			if (slot >= 0)
+				CastCtrSpellShortcut(slot);
+			return;
+		}
+
+		case ControllerButton_BUTTON_DPAD_UP:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+			return;
+
+		case ControllerButton_BUTTON_DPAD_LEFT:
+			DrinkPotion3DS(0, 4);
+			return;
+
+		case ControllerButton_BUTTON_DPAD_RIGHT:
+			DrinkPotion3DS(4, MaxBeltItems);
+			return;
+
+		case ControllerButton_BUTTON_DPAD_DOWN:
+			DoAutoMap();
+			return;
+
+		case ControllerButton_BUTTON_BACK:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_INVENTORY });
+			return;
+
+		case ControllerButton_BUTTON_START:
+			gamemenu_on();
+			return;
+
+		case ControllerButton_AXIS_TRIGGERLEFT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_CHARACTER_INFO });
+			return;
+
+		case ControllerButton_AXIS_TRIGGERRIGHT:
+			ProcessGameAction(GameAction { GameActionType_TOGGLE_SPELL_BOOK });
+			return;
+
+		default:
+			break;
+		}
+	}
+#endif
+
+	const PadmapperOptions::Action *action = GetOptions().Padmapper.findAction(button, IsControllerButtonPressed);
+	if (action == nullptr) return;
+	if (IsMovementHandlerActive() && CanDeferToMovementHandler(*action)) return;
+	PadmapperPress(button, *action);
+}
+
+} // namespace
+
+#ifdef __3DS__
+namespace {
+CtrBeltGesture HudBeltGesture;
+Item HudBeltOriginal;
+bool HudTouchDown = false;
+
+bool CtrHudTouchAllowed()
+{
+	return MyPlayer != nullptr && !MyPlayerIsDead && PauseMode == 0 && !gmenu_is_active()
+	    && !invflag && !CharFlag && !SpellbookFlag && !QuestLogIsOpen
+	    && !IsPlayerInStore() && !IsStashOpen && !qtextflag && !ChatFlag
+	    && !DropGoldFlag && !SpellSelectFlag && MyPlayer->HoldItem.isEmpty();
+}
+Point CtrHudTouchPoint() { return { MousePosition.x * 320 / gnScreenWidth, MousePosition.y - 240 }; }
+int CtrHudBeltHit(Point p) {
+	for (int slot = 0; slot < MaxBeltItems; ++slot)
+		if (CtrBottomBeltSlot(slot).contains(p)) return slot;
+	return -1;
+}
+bool CtrHudBeltUnchanged() {
+	if (HudBeltGesture.slot < 0) return false;
+	const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
+	return !item.isEmpty() && item._iSeed == HudBeltOriginal._iSeed
+	    && item.IDidx == HudBeltOriginal.IDidx && item._iCreateInfo == HudBeltOriginal._iCreateInfo
+	    && item._iMiscId == HudBeltOriginal._iMiscId && item._iSpell == HudBeltOriginal._iSpell;
+}
+}
+
+void Update3DSHudTouch()
+{
+	if (!HudTouchDown || HudBeltGesture.slot < 0) return;
+	if (!CtrHudTouchAllowed() || (!HudBeltGesture.used && !CtrHudBeltUnchanged())) {
+		HudBeltGesture.Cancel();
+		return;
+	}
+	if (HudBeltGesture.Update(CtrHudTouchPoint(), SDL_GetTicks())) {
+		ControlMode = ControlTypes::Gamepad;
+		const Item &item = MyPlayer->SpdList[HudBeltGesture.slot];
+		if (item.isScroll()) UpdateSpellTarget(item._iSpell);
+		UseBeltSlot(HudBeltGesture.slot);
+		RedrawEverything();
+	}
+}
+
+int CtrHudDraggedBeltSlot()
+{
+	return HudTouchDown && HudBeltGesture.dragging && !HudBeltGesture.used ? HudBeltGesture.slot : -1;
+}
+
+bool Handle3DSHudTouch(Uint32 eventType, Uint8 button)
+{
+	if (eventType == SDL_EVENT_MOUSE_BUTTON_DOWN && button == SDL_BUTTON_LEFT) {
+		if (MousePosition.y < 240 || !CtrHudTouchAllowed()) return false;
+		HudTouchDown = true;
+		HudBeltGesture.Cancel();
+		const Point p = CtrHudTouchPoint();
+		const int belt = CtrHudBeltHit(p);
+		if (belt >= 0 && !MyPlayer->SpdList[belt].isEmpty()) {
+			HudBeltGesture.Begin(belt, p, SDL_GetTicks());
+			HudBeltOriginal = MyPlayer->SpdList[belt];
+		} else {
+			for (int slot = 0; slot < CtrSpellShortcutCount; ++slot)
+				if (CtrHudSpellSlot(slot).contains(p)) {
+					CastCtrSpellShortcut(slot);
+					break;
+				}
+		}
+		return true;
+	}
+	if (!HudTouchDown) return false;
+	if (eventType == SDL_EVENT_MOUSE_MOTION) {
+		Update3DSHudTouch();
+		RedrawEverything();
+		return true;
+	}
+	if (eventType != SDL_EVENT_MOUSE_BUTTON_UP || button != SDL_BUTTON_LEFT) return false;
+	Update3DSHudTouch();
+	if (CtrHudTouchAllowed() && CtrHudBeltUnchanged() && HudBeltGesture.dragging && !HudBeltGesture.used) {
+		const int target = CtrHudBeltHit(CtrHudTouchPoint());
+		const int source = HudBeltGesture.slot;
+		if (target >= 0 && target != source) {
+			std::swap(MyPlayer->SpdList[source], MyPlayer->SpdList[target]);
+			MyPlayer->CalcScrolls();
+			if (MyPlayer->SpdList[source].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, source);
+			else NetSendCmdChBeltItem(false, source);
+			if (MyPlayer->SpdList[target].isEmpty()) NetSendCmdParam1(false, CMD_DELBELTITEMS, target);
+			else NetSendCmdChBeltItem(false, target);
+		}
+	}
+	HudTouchDown = false;
+	HudBeltGesture.Cancel();
+	RedrawEverything();
+	return true;
+}
+
+void Reset3DSInputAfterResume()
+{
+	// Cancel gestures rather than invoking their release actions (drop/sell/use).
+	Cancel3DSButtonAHold();
+	Confirm3DSVisualStoreSale(false);
+	HudTouchDown = false;
+	HudBeltGesture.Cancel();
+	StashItemButton.active = false;
+	StashItemButton.finished = true;
+	CtrConsumedSpellButtons = 0;
+	ControllerActionHeld = GameActionType_NONE;
+	LastPlayerAction = PlayerActionType::None;
+	sgbMouseDown = CLICK_NONE;
+	PadHotspellMenuActive = false;
+	PadMenuNavigatorActive = false;
+	SuppressedButton = ControllerButton_NONE;
+	for (unsigned i = ControllerButton::FIRST; i <= ControllerButton::LAST; ++i)
+		PadmapperRelease(static_cast<ControllerButton>(i), false);
+	leftStickX = leftStickY = rightStickX = rightStickY = 0;
+	leftStickXUnscaled = leftStickYUnscaled = rightStickXUnscaled = rightStickYUnscaled = 0;
+	leftStickNeedsScaling = rightStickNeedsScaling = true;
+	ResetMainPanelButtons();
+	if (MyPlayer != nullptr && gbRunGame && !gbIsMultiplayer)
+		MyPlayer->Stop();
+	RedrawEverything();
+}
+
+void Update3DSStashItemAction()
+{
+	if (!StashItemButton.active || StashItemButton.finished)
+		return;
+	if (!CanFinishStashItemAction()) {
+		StashItemButton.finished = true;
+		return;
+	}
+	if (static_cast<uint32_t>(SDL_GetTicks() - StashItemButton.pressedAt) < 500)
+		return;
+	// Consume the gesture even when the destination is full: releasing Y
+	// after a failed transfer must never turn it into a ground drop.
+	StashItemButton.finished = true;
+	Player &player = *MyPlayer;
+	Item &item = player.HoldItem;
+	const bool placed = StashItemButton.toStash
+	    ? AutoPlaceItemInStash(item, true)
+	    : (item._itype == ItemType::Gold ? GoldAutoPlace(player, item) : AutoPlaceItemInInventory(player, item, true));
+	if (!placed) {
+		player.SaySpecific(HeroSpeech::IHaveNoRoom);
+		return;
+	}
+	item.clear();
+	NewCursor(CURSOR_HAND);
+	PlaySFX(SfxID::GrabItem);
+}
+
+void Cancel3DSButtonAHold()
+{
+	ButtonAHold.active = false;
+	ButtonAHold.triggered = false;
+	ButtonAHold.invItem = -1;
+	ButtonAHold.stashItem = StashStruct::EmptyCell;
+}
+
+void Update3DSButtonAHold()
+{
+	if (!ButtonAHold.active || ButtonAHold.triggered)
+		return;
+
+	const bool uiOpen = invflag || CharFlag || SpellbookFlag || QuestLogIsOpen || IsPlayerInStore() || qtextflag || IsStashOpen || SpellSelectFlag;
+	if (!uiOpen) {
+		Cancel3DSButtonAHold();
+		return;
+	}
+
+	if (ButtonAHold.invItem != -1 && pcursinvitem != ButtonAHold.invItem) {
+		Cancel3DSButtonAHold();
+		return;
+	}
+	if (ButtonAHold.stashItem != StashStruct::EmptyCell && pcursstashitem != ButtonAHold.stashItem) {
+		Cancel3DSButtonAHold();
+		return;
+	}
+
+	constexpr uint32_t HoldThresholdMs = 350;
+	if (static_cast<uint32_t>(SDL_GetTicks() - ButtonAHold.pressedAt) < HoldThresholdMs)
+		return;
+
+	ButtonAHold.triggered = true;
+
+	if (IsVisualStoreOpen) {
+		// Selling is an explicit (Y) action with confirmation; holding (A)
+		// must not sell or use an item while browsing a vendor.
+		return;
+	} else if (IsStashOpen && pcursstashitem != StashStruct::EmptyCell) {
+		CtrlUseStashItem();
+	} else if (pcursinvitem != -1) {
+		CtrlUseInvItem();
+	}
+}
+#endif
+
+ControllerButton TranslateTo(GamepadLayout layout, ControllerButton button)
+{
+	if (layout != GamepadLayout::Nintendo)
+		return button;
+
+	switch (button) {
+	case ControllerButton_BUTTON_A:
+		return ControllerButton_BUTTON_B;
+	case ControllerButton_BUTTON_B:
+		return ControllerButton_BUTTON_A;
+	case ControllerButton_BUTTON_X:
+		return ControllerButton_BUTTON_Y;
+	case ControllerButton_BUTTON_Y:
+		return ControllerButton_BUTTON_X;
+	default:
+		return button;
+	}
+}
+
+bool SkipsMovie(ControllerButtonEvent ctrlEvent)
+{
+	return IsAnyOf(ctrlEvent.button,
+	    ControllerButton_BUTTON_A,
+	    ControllerButton_BUTTON_B,
+	    ControllerButton_BUTTON_START,
+	    ControllerButton_BUTTON_BACK);
+}
+
+bool IsSimulatedMouseClickBinding(ControllerButtonEvent ctrlEvent)
+{
+	if (ctrlEvent.button == ControllerButton_NONE)
+		return false;
+	if (!ctrlEvent.up && ctrlEvent.button == SuppressedButton)
+		return false;
+	const std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
+	return IsAnyOf(actionName, "LeftMouseClick1", "LeftMouseClick2", "RightMouseClick1", "RightMouseClick2");
+}
+
+AxisDirection GetMoveDirection()
+{
+	return GetLeftStickOrDpadDirection(true);
+}
+
+bool HandleControllerButtonEvent(const SDL_Event &event, const ControllerButtonEvent ctrlEvent, GameAction &action)
+{
+	if (ctrlEvent.button == ControllerButton_IGNORE) {
+		return false;
+	}
+
+	struct ButtonReleaser {
+		~ButtonReleaser()
+		{
+			if (ctrlEvent.up) PadmapperRelease(ctrlEvent.button, /*invokeAction=*/false);
+		}
+		ControllerButtonEvent ctrlEvent;
+	};
+
+	const ButtonReleaser buttonReleaser { ctrlEvent };
+	const bool isGamepadMotion = IsControllerMotion(event);
+	if (!isGamepadMotion) {
+		SimulateRightStickWithPadmapper(ctrlEvent);
+	}
+	DetectInputMethod(event, ctrlEvent);
+	if (isGamepadMotion) {
+		return true;
+	}
+
+	if (ctrlEvent.button != ControllerButton_NONE && ctrlEvent.button == SuppressedButton) {
+		if (!ctrlEvent.up)
+			return true;
+		SuppressedButton = ControllerButton_NONE;
+	}
+
+#ifdef __3DS__
+	if (ctrlEvent.button == ControllerButton_BUTTON_Y
+	    && (StashItemButton.active || (IsStashOpen && !gmenu_is_active() && !IsWithdrawGoldOpen && !DropGoldFlag))) {
+		if (!ctrlEvent.up)
+			PerformSecondaryAction();
+		StashItemButton.active = false;
+		StashItemButton.finished = true;
+		return true;
+	}
+	if (!ctrlEvent.up && ctrlEvent.button != ControllerButton_NONE)
+		StashItemButton.finished = true;
+#endif
+
+	if (ctrlEvent.up && !PadmapperActionNameTriggeredByButtonEvent(ctrlEvent).empty()) {
+		// Button press may have brought up a menu;
+		// don't confuse release of that button with intent to interact with the menu
+
+		// Handle visual store button release for physical gamepad
+		std::string_view actionName = PadmapperActionNameTriggeredByButtonEvent(ctrlEvent);
+		if (actionName == "PrimaryAction") {
+			PerformPrimaryActionRelease();
+		}
+
+		PadmapperRelease(ctrlEvent.button, /*invokeAction=*/true);
+		return true;
+	} else if (GetGameAction(event, ctrlEvent, &action)) {
+		ProcessGameAction(action);
+		return true;
+	} else if (ctrlEvent.button != ControllerButton_NONE) {
+#ifdef __3DS__
+		if (ctrlEvent.up)
+			ReleaseControllerButton(ctrlEvent.button);
+		else
+			PressControllerButton(ctrlEvent.button);
+#else
+		if (!ctrlEvent.up)
+			PressControllerButton(ctrlEvent.button);
+#endif
+		return true;
+	}
+
+	return false;
+}
+
+} // namespace devilution
